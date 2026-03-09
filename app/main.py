@@ -5,18 +5,18 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from docx import Document
 
-
 app = FastAPI(
     title="GPT Doc Backend",
     description="Backend básico para generar documentos Word desde FastAPI",
-    version="0.1.0"
+    version="0.1.1",
+    docs_url="/docs",
+    redoc_url="/redoc",
+    openapi_url="/openapi.json",
 )
-
 
 class ReportRequest(BaseModel):
     title: str
     paragraphs: list[str] = []
-
 
 @app.get("/")
 def root():
@@ -25,11 +25,9 @@ def root():
         "service": "gpt-doc-backend"
     }
 
-
 @app.get("/health")
 def health():
     return {"status": "ok"}
-
 
 @app.post("/generate-docx")
 def generate_docx(payload: ReportRequest):
