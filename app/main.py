@@ -5,7 +5,7 @@ from typing import List, Optional, Literal, Union
 from io import BytesIO
 from docx import Document
 from docx.shared import Inches, Pt, RGBColor
-from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_BREAK
+from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.enum.table import WD_TABLE_ALIGNMENT, WD_CELL_VERTICAL_ALIGNMENT
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
@@ -14,7 +14,7 @@ import requests
 
 app = FastAPI(
     title="GPT Doc Backend",
-    version="0.6.0",
+    version="0.6.1",
     description="Backend para generación de cartas e informes profesionales en formato Word (.docx)."
 )
 
@@ -305,19 +305,25 @@ def add_header_footer(section, header_text: Optional[str], footer_text: Optional
         hp.alignment = WD_ALIGN_PARAGRAPH.CENTER
         hp.text = ""
         run = hp.add_run(header_text)
-        set_run_font(run, size=9, italic=True, color="666666")
+        set_run_font(run, size=8.5, italic=True, color="707070")
 
     fp = section.footer.paragraphs[0]
     fp.alignment = WD_ALIGN_PARAGRAPH.CENTER
     fp.text = ""
 
     if footer_text:
-        left = fp.add_run(footer_text + "  |  Página ")
-        set_run_font(left, size=8.5, color="666666")
+        left = fp.add_run(footer_text)
+        set_run_font(left, size=8.5, color="707070")
+        sep = fp.add_run("  |  ")
+        set_run_font(sep, size=8.5, color="A0A0A0")
     else:
         left = fp.add_run("Página ")
-        set_run_font(left, size=8.5, color="666666")
+        set_run_font(left, size=8.5, color="707070")
+        add_page_number(fp)
+        return
 
+    page_label = fp.add_run("Página ")
+    set_run_font(page_label, size=8.5, color="707070")
     add_page_number(fp)
 
 
@@ -326,7 +332,7 @@ def add_header_footer(section, header_text: Optional[str], footer_text: Optional
 # =========================
 
 def add_report_cover(doc: Document, report: dict):
-    add_logo(doc, report.get("logo_url"), width=1.05)
+    add_logo(doc, report.get("logo_url"), width=0.95)
 
     institution = (report.get("institution") or "").strip()
     faculty = (report.get("faculty") or "").strip()
@@ -342,75 +348,75 @@ def add_report_cover(doc: Document, report: dict):
     if institution:
         p = doc.add_paragraph()
         p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        p.paragraph_format.space_before = Pt(6)
-        p.paragraph_format.space_after = Pt(2)
+        p.paragraph_format.space_before = Pt(4)
+        p.paragraph_format.space_after = Pt(1)
         r = p.add_run(institution.upper())
-        set_run_font(r, size=12, bold=True)
+        set_run_font(r, size=11.5, bold=True)
 
     if faculty:
         p = doc.add_paragraph()
         p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        p.paragraph_format.space_after = Pt(2)
+        p.paragraph_format.space_after = Pt(1)
         r = p.add_run(faculty)
-        set_run_font(r, size=11, bold=True)
+        set_run_font(r, size=10.8, bold=True)
 
     if department:
         p = doc.add_paragraph()
         p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        p.paragraph_format.space_after = Pt(10)
+        p.paragraph_format.space_after = Pt(8)
         r = p.add_run(department)
-        set_run_font(r, size=10, color="555555")
+        set_run_font(r, size=9.8, color="555555")
 
     sep = doc.add_paragraph()
     sep.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    sep.paragraph_format.space_after = Pt(8)
-    add_horizontal_rule(sep, color="BFBFBF", size="6")
+    sep.paragraph_format.space_after = Pt(6)
+    add_horizontal_rule(sep, color="C6C6C6", size="6")
 
     p = doc.add_paragraph()
     p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    p.paragraph_format.space_after = Pt(8)
+    p.paragraph_format.space_after = Pt(6)
     r = p.add_run(report_kind.upper())
-    set_run_font(r, size=12, bold=True, color="404040")
+    set_run_font(r, size=11.5, bold=True, color="404040")
 
     if title:
         p = doc.add_paragraph()
         p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        p.paragraph_format.space_after = Pt(6)
+        p.paragraph_format.space_after = Pt(5)
         r = p.add_run(title)
-        set_run_font(r, size=15.5, bold=True)
+        set_run_font(r, size=15, bold=True)
 
     if subtitle:
         p = doc.add_paragraph()
         p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        p.paragraph_format.space_after = Pt(14)
+        p.paragraph_format.space_after = Pt(10)
         r = p.add_run(subtitle)
-        set_run_font(r, size=11, italic=True, color="555555")
+        set_run_font(r, size=10.5, italic=True, color="555555")
 
     if author:
         p = doc.add_paragraph()
         p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        p.paragraph_format.space_after = Pt(2)
+        p.paragraph_format.space_after = Pt(1)
         r1 = p.add_run("Autor: ")
-        set_run_font(r1, size=11, bold=True)
+        set_run_font(r1, size=10.5, bold=True)
         r2 = p.add_run(author)
-        set_run_font(r2, size=11)
+        set_run_font(r2, size=10.5)
 
     if reviewer:
         p = doc.add_paragraph()
         p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        p.paragraph_format.space_after = Pt(2)
+        p.paragraph_format.space_after = Pt(1)
         r1 = p.add_run("Revisor / Asesor: ")
-        set_run_font(r1, size=11, bold=True)
+        set_run_font(r1, size=10.5, bold=True)
         r2 = p.add_run(reviewer)
-        set_run_font(r2, size=11)
+        set_run_font(r2, size=10.5)
 
     if city or date:
         p = doc.add_paragraph()
         p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        p.paragraph_format.space_before = Pt(8)
+        p.paragraph_format.space_before = Pt(6)
         text = f"{city}, {date}" if city and date else city or date
         r = p.add_run(text)
-        set_run_font(r, size=10.5, color="555555")
+        set_run_font(r, size=10, color="555555")
 
     doc.add_page_break()
 
@@ -442,7 +448,6 @@ def add_apa_table(doc: Document, table_data: dict):
     table.alignment = WD_TABLE_ALIGNMENT.CENTER
     table.style = "Table Grid"
 
-    # header
     for i, header in enumerate(headers):
         cell = table.rows[0].cells[i]
         cell.text = ""
@@ -465,7 +470,6 @@ def add_apa_table(doc: Document, table_data: dict):
             right={"val": "nil"},
         )
 
-    # rows
     for row_idx, row in enumerate(rows):
         row_cells = table.add_row().cells
         for i, value in enumerate(row):
@@ -530,7 +534,7 @@ def add_figure_from_url(doc: Document, figure: dict):
         if caption:
             p = doc.add_paragraph()
             p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-            p.paragraph_format.space_before = Pt(3)
+            p.paragraph_format.space_before = Pt(4)
             p.paragraph_format.space_after = Pt(8)
             p.paragraph_format.first_line_indent = Inches(0)
             r = p.add_run(caption)
@@ -581,7 +585,7 @@ def add_quickchart(doc: Document, chart: dict):
         if caption:
             p = doc.add_paragraph()
             p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-            p.paragraph_format.space_before = Pt(3)
+            p.paragraph_format.space_before = Pt(4)
             p.paragraph_format.space_after = Pt(8)
             p.paragraph_format.first_line_indent = Inches(0)
             r = p.add_run(caption)
@@ -743,11 +747,13 @@ def build_report_doc(report: ReportPayload) -> BytesIO:
             p = doc.add_paragraph()
             p.alignment = WD_ALIGN_PARAGRAPH.LEFT
             p.paragraph_format.line_spacing = 1.5
-            p.paragraph_format.space_after = Pt(4)
-            p.paragraph_format.left_indent = Inches(0.3)
-            p.paragraph_format.first_line_indent = Inches(-0.3)
+            p.paragraph_format.space_after = Pt(5)
+            p.paragraph_format.space_before = Pt(0)
+            p.paragraph_format.left_indent = Inches(0.38)
+            p.paragraph_format.first_line_indent = Inches(-0.38)
+
             r = p.add_run(ref)
-            set_run_font(r, size=12)
+            set_run_font(r, size=11.5)
 
     output = BytesIO()
     doc.save(output)
