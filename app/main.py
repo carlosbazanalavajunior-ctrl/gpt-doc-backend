@@ -10,7 +10,6 @@ from pydantic import BaseModel, Field
 from docx import Document
 from docx.shared import Inches, Pt
 from docx.enum.text import WD_PARAGRAPH_ALIGNMENT
-from docx.enum.section import WD_SECTION_START
 
 
 app = FastAPI(
@@ -23,18 +22,10 @@ app = FastAPI(
 )
 
 
-# =========================
-# Modelos simples existentes
-# =========================
-
 class ReportRequest(BaseModel):
     title: str
     paragraphs: List[str] = []
 
-
-# =========================
-# Modelos enriquecidos
-# =========================
 
 class MetadataItem(BaseModel):
     label: str
@@ -89,13 +80,9 @@ class RichReportRequest(BaseModel):
     recommendations: List[str] = []
 
 
-# =========================
-# Utilidades
-# =========================
-
 def sanitize_filename(name: str) -> str:
     safe = name.strip().lower().replace(" ", "_")
-    safe = re.sub(r"[^a-zA-Z0-9_\\-]", "", safe)
+    safe = re.sub(r"[^a-zA-Z0-9_\-]", "", safe)
     return safe or "documento"
 
 
@@ -113,10 +100,7 @@ def configure_document(doc: Document) -> None:
 
 
 def add_text_with_bold(paragraph, text: str) -> None:
-    """
-    Soporta negrita con formato **texto**
-    """
-    parts = re.split(r"(\\*\\*.*?\\*\\*)", text)
+    parts = re.split(r"(\*\*.*?\*\*)", text)
     for part in parts:
         if not part:
             continue
@@ -272,17 +256,14 @@ def add_section_block(doc: Document, section: SectionBlock) -> None:
         p = doc.add_paragraph(style="List Number")
         add_text_with_bold(p, item)
 
-    if section.tables:
-        for table_data in section.tables:
-            add_table_block(doc, table_data)
+    for table_data in section.tables:
+        add_table_block(doc, table_data)
 
-    if section.images:
-        for image_data in section.images:
-            add_image_block(doc, image_data)
+    for image_data in section.images:
+        add_image_block(doc, image_data)
 
-    if section.charts:
-        for chart_data in section.charts:
-            add_chart_block(doc, chart_data)
+    for chart_data in section.charts:
+        add_chart_block(doc, chart_data)
 
 
 def build_basic_docx(payload: ReportRequest) -> BytesIO:
@@ -310,14 +291,12 @@ def build_rich_docx(payload: RichReportRequest) -> BytesIO:
     doc = Document()
     configure_document(doc)
 
-    # Título
     p_title = doc.add_paragraph()
     p_title.alignment = WD_PARAGRAPH_ALIGNMENT.CENTER
     run_title = p_title.add_run(payload.title)
     run_title.bold = True
     run_title.font.size = Pt(20)
 
-    # Subtítulo
     if payload.subtitle:
         p_sub = doc.add_paragraph()
         p_sub.alignment = WD_PARAGRAPH_ALIGNMENT.CENTER
@@ -327,29 +306,24 @@ def build_rich_docx(payload: RichReportRequest) -> BytesIO:
 
     doc.add_paragraph("")
 
-    # Metadatos
     add_metadata(doc, payload.metadata)
     if payload.metadata:
         doc.add_paragraph("")
 
-    # Resumen ejecutivo
     if payload.executive_summary:
         add_heading(doc, "Resumen ejecutivo", level=1)
         for item in payload.executive_summary:
             add_paragraph_block(doc, item)
 
-    # Secciones principales
     for section in payload.sections:
         add_section_block(doc, section)
 
-    # Conclusiones
     if payload.conclusions:
         add_heading(doc, "Conclusiones", level=1)
         for item in payload.conclusions:
             p = doc.add_paragraph(style="List Bullet")
             add_text_with_bold(p, item)
 
-    # Recomendaciones
     if payload.recommendations:
         add_heading(doc, "Recomendaciones", level=1)
         for item in payload.recommendations:
@@ -361,10 +335,6 @@ def build_rich_docx(payload: RichReportRequest) -> BytesIO:
     buffer.seek(0)
     return buffer
 
-
-# =========================
-# Endpoints
-# =========================
 
 @app.get("/")
 def root():
