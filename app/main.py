@@ -14,7 +14,7 @@ import requests
 
 app = FastAPI(
     title="GPT Doc Backend",
-    version="0.4.0",
+    version="0.5.0",
     description="Backend para generación de cartas e informes profesionales en formato Word (.docx)."
 )
 
@@ -101,8 +101,28 @@ class GenerateDocumentRequest(BaseModel):
 
 
 # =========================
-# HELPERS DOCX
+# HELPERS XML / DOCX
 # =========================
+
+def set_run_font(run, name="Times New Roman", size=12, bold=False, italic=False, color=None):
+    run.font.name = name
+    run._element.rPr.rFonts.set(qn("w:eastAsia"), name)
+    run.font.size = Pt(size)
+    run.bold = bold
+    run.italic = italic
+    if color:
+        run.font.color.rgb = RGBColor.from_string(color)
+
+
+def fetch_binary(url: str) -> BytesIO:
+    response = requests.get(
+        url,
+        timeout=25,
+        headers={"User-Agent": "Mozilla/5.0"}
+    )
+    response.raise_for_status()
+    return BytesIO(response.content)
+
 
 def set_cell_border(cell, **kwargs):
     tc = cell._tc
@@ -128,32 +148,67 @@ def set_cell_border(cell, **kwargs):
                     element.set(qn(f"w:{key}"), str(edge_data[key]))
 
 
-def set_run_font(run, name="Times New Roman", size=12, bold=False, italic=False, color=None):
-    run.font.name = name
-    run._element.rPr.rFonts.set(qn("w:eastAsia"), name)
-    run.font.size = Pt(size)
-    run.bold = bold
-    run.italic = italic
-    if color:
-        run.font.color.rgb = RGBColor.from_string(color)
+def shade_cell(cell, fill="EDEDED"):
+    tcPr = cell._tc.get_or_add_tcPr()
+    shd = OxmlElement("w:shd")
+    shd.set(qn("w:fill"), fill)
+    tcPr.append(shd)
 
 
-def fetch_binary(url: str) -> BytesIO:
-    response = requests.get(
-        url,
-        timeout=25,
-        headers={
-            "User-Agent": "Mozilla/5.0"
-        }
+def remove_cell_borders(cell):
+    set_cell_border(
+        cell,
+        top={"val": "nil"},
+        bottom={"val": "nil"},
+        left={"val": "nil"},
+        right={"val": "nil"},
     )
-    response.raise_for_status()
-    return BytesIO(response.content)
 
+
+def add_page_number(paragraph):
+    run = paragraph.add_run()
+    fld_char1 = OxmlElement("w:fldChar")
+    fld_char1.set(qn("w:fldCharType"), "begin")
+
+    instr_text = OxmlElement("w:instrText")
+    instr_text.set(qn("xml:space"), "preserve")
+    instr_text.text = "PAGE"
+
+    fld_char2 = OxmlElement("w:fldChar")
+    fld_char2.set(qn("w:fldCharType"), "end")
+
+    run._r.append(fld_char1)
+    run._r.append(instr_text)
+    run._r.append(fld_char2)
+
+
+def add_horizontal_rule(paragraph, color="A6A6A6", size="6"):
+    p = paragraph._p
+    pPr = p.get_or_add_pPr()
+    pbdr = pPr.find(qn("w:pBdr"))
+    if pbdr is None:
+        pbdr = OxmlElement("w:pBdr")
+        pPr.append(pbdr)
+
+    bottom = pbdr.find(qn("w:bottom"))
+    if bottom is None:
+        bottom = OxmlElement("w:bottom")
+        pbdr.append(bottom)
+
+    bottom.set(qn("w:val"), "single")
+    bottom.set(qn("w:sz"), size)
+    bottom.set(qn("w:space"), "1")
+    bottom.set(qn("w:color"), color)
+
+
+# =========================
+# ESTILO GENERAL
+# =========================
 
 def configure_document(doc: Document):
     section = doc.sections[0]
     section.top_margin = Inches(1.0)
-    section.bottom_margin = Inches(1.0)
+    section.bottom_margin = Inches(0.9)
     section.left_margin = Inches(1.1)
     section.right_margin = Inches(1.0)
 
@@ -163,41 +218,38 @@ def configure_document(doc: Document):
     normal.font.size = Pt(12)
     normal.paragraph_format.line_spacing = 1.5
     normal.paragraph_format.space_after = Pt(8)
+    normal.paragraph_format.space_before = Pt(0)
     normal.paragraph_format.first_line_indent = Inches(0.28)
 
-    for style_name, size, italic in [
-        ("Heading 1", 15, False),
-        ("Heading 2", 13, False),
-        ("Heading 3", 12, False),
-        ("Heading 4", 12, True),
-    ]:
+    styles = [
+        ("Heading 1", 14, False, Pt(12), Pt(6)),
+        ("Heading 2", 13, False, Pt(10), Pt(5)),
+        ("Heading 3", 12, False, Pt(8), Pt(4)),
+        ("Heading 4", 12, True, Pt(6), Pt(4)),
+    ]
+
+    for style_name, size, italic, before, after in styles:
         style = doc.styles[style_name]
         style.font.name = "Times New Roman"
         style._element.rPr.rFonts.set(qn("w:eastAsia"), "Times New Roman")
         style.font.size = Pt(size)
         style.font.bold = True
         style.font.italic = italic
-        style.paragraph_format.space_before = Pt(12)
-        style.paragraph_format.space_after = Pt(6)
+        style.paragraph_format.space_before = before
+        style.paragraph_format.space_after = after
         style.paragraph_format.line_spacing = 1.15
         style.paragraph_format.first_line_indent = Inches(0)
 
 
-def add_header_footer(doc: Document, header_text: Optional[str], footer_text: Optional[str]):
-    for section in doc.sections:
-        if header_text:
-            p = section.header.paragraphs[0]
-            p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-            p.text = ""
-            run = p.add_run(header_text)
-            set_run_font(run, size=9, italic=True, color="666666")
-
-        if footer_text:
-            p = section.footer.paragraphs[0]
-            p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-            p.text = ""
-            run = p.add_run(footer_text)
-            set_run_font(run, size=9, color="666666")
+def add_logo(doc: Document, logo_url: Optional[str], width=1.0):
+    if not logo_url:
+        return
+    try:
+        stream = fetch_binary(logo_url)
+        doc.add_picture(stream, width=Inches(width))
+        doc.paragraphs[-1].alignment = WD_ALIGN_PARAGRAPH.CENTER
+    except Exception:
+        pass
 
 
 def add_rich_text_paragraph(doc: Document, text: str, align=WD_ALIGN_PARAGRAPH.JUSTIFY, first_indent=True):
@@ -219,45 +271,66 @@ def add_bullet_list(doc: Document, items: List[str]):
     for item in items:
         p = doc.add_paragraph(style="List Bullet")
         p.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
-        p.paragraph_format.line_spacing = 1.3
-        p.paragraph_format.space_after = Pt(4)
-        p.paragraph_format.left_indent = Inches(0.3)
+        p.paragraph_format.line_spacing = 1.25
+        p.paragraph_format.space_after = Pt(3)
+        p.paragraph_format.space_before = Pt(0)
+        p.paragraph_format.left_indent = Inches(0.25)
         p.paragraph_format.first_line_indent = Inches(0)
 
         parts = item.split("**")
         for i, part in enumerate(parts):
             run = p.add_run(part)
-            set_run_font(run, size=12, bold=(i % 2 == 1))
+            set_run_font(run, size=11, bold=(i % 2 == 1))
 
 
 def add_numbered_list(doc: Document, items: List[str]):
     for item in items:
         p = doc.add_paragraph(style="List Number")
         p.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
-        p.paragraph_format.line_spacing = 1.3
-        p.paragraph_format.space_after = Pt(4)
-        p.paragraph_format.left_indent = Inches(0.3)
+        p.paragraph_format.line_spacing = 1.25
+        p.paragraph_format.space_after = Pt(3)
+        p.paragraph_format.space_before = Pt(0)
+        p.paragraph_format.left_indent = Inches(0.25)
         p.paragraph_format.first_line_indent = Inches(0)
 
         parts = item.split("**")
         for i, part in enumerate(parts):
             run = p.add_run(part)
-            set_run_font(run, size=12, bold=(i % 2 == 1))
+            set_run_font(run, size=11, bold=(i % 2 == 1))
 
 
-def add_logo(doc: Document, logo_url: Optional[str], width=1.2):
-    if not logo_url:
-        return
-    try:
-        stream = fetch_binary(logo_url)
-        doc.add_picture(stream, width=Inches(width))
-        doc.paragraphs[-1].alignment = WD_ALIGN_PARAGRAPH.CENTER
-    except Exception:
-        pass
+# =========================
+# HEADER / FOOTER
+# =========================
 
+def add_header_footer(section, header_text: Optional[str], footer_text: Optional[str]):
+    if header_text:
+        hp = section.header.paragraphs[0]
+        hp.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        hp.text = ""
+        run = hp.add_run(header_text)
+        set_run_font(run, size=9, italic=True, color="666666")
+
+    fp = section.footer.paragraphs[0]
+    fp.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    fp.text = ""
+
+    if footer_text:
+        run = fp.add_run(footer_text + " | Página ")
+        set_run_font(run, size=9, color="666666")
+    else:
+        run = fp.add_run("Página ")
+        set_run_font(run, size=9, color="666666")
+
+    add_page_number(fp)
+
+
+# =========================
+# PORTADA INFORME
+# =========================
 
 def add_report_cover(doc: Document, report: dict):
-    add_logo(doc, report.get("logo_url"), width=1.25)
+    add_logo(doc, report.get("logo_url"), width=1.1)
 
     institution = (report.get("institution") or "").strip()
     faculty = (report.get("faculty") or "").strip()
@@ -273,79 +346,82 @@ def add_report_cover(doc: Document, report: dict):
     if institution:
         p = doc.add_paragraph()
         p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        p.paragraph_format.space_before = Pt(10)
-        p.paragraph_format.space_after = Pt(4)
+        p.paragraph_format.space_before = Pt(8)
+        p.paragraph_format.space_after = Pt(2)
         r = p.add_run(institution.upper())
-        set_run_font(r, size=13, bold=True)
+        set_run_font(r, size=12, bold=True)
 
     if faculty:
         p = doc.add_paragraph()
         p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        p.paragraph_format.space_after = Pt(3)
+        p.paragraph_format.space_after = Pt(2)
         r = p.add_run(faculty)
-        set_run_font(r, size=12, bold=True)
+        set_run_font(r, size=11, bold=True)
 
     if department:
         p = doc.add_paragraph()
         p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        p.paragraph_format.space_after = Pt(24)
+        p.paragraph_format.space_after = Pt(12)
         r = p.add_run(department)
-        set_run_font(r, size=11)
+        set_run_font(r, size=10, color="555555")
+
+    sep = doc.add_paragraph()
+    sep.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    sep.paragraph_format.space_after = Pt(10)
+    add_horizontal_rule(sep, color="BFBFBF", size="6")
 
     p = doc.add_paragraph()
     p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    p.paragraph_format.space_after = Pt(18)
+    p.paragraph_format.space_after = Pt(10)
     r = p.add_run(report_kind.upper())
-    set_run_font(r, size=14, bold=True, color="1F1F1F")
+    set_run_font(r, size=12, bold=True, color="404040")
 
     if title:
         p = doc.add_paragraph()
         p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        p.paragraph_format.space_after = Pt(10)
+        p.paragraph_format.space_after = Pt(8)
         r = p.add_run(title)
         set_run_font(r, size=16, bold=True)
 
     if subtitle:
         p = doc.add_paragraph()
         p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        p.paragraph_format.space_after = Pt(28)
+        p.paragraph_format.space_after = Pt(18)
         r = p.add_run(subtitle)
-        set_run_font(r, size=12, italic=True, color="444444")
+        set_run_font(r, size=11, italic=True, color="555555")
 
     if author:
         p = doc.add_paragraph()
         p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        p.paragraph_format.space_after = Pt(5)
+        p.paragraph_format.space_after = Pt(3)
         r1 = p.add_run("Autor: ")
-        set_run_font(r1, size=12, bold=True)
+        set_run_font(r1, size=11, bold=True)
         r2 = p.add_run(author)
-        set_run_font(r2, size=12)
+        set_run_font(r2, size=11)
 
     if reviewer:
         p = doc.add_paragraph()
         p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        p.paragraph_format.space_after = Pt(5)
+        p.paragraph_format.space_after = Pt(3)
         r1 = p.add_run("Revisor / Asesor: ")
-        set_run_font(r1, size=12, bold=True)
+        set_run_font(r1, size=11, bold=True)
         r2 = p.add_run(reviewer)
-        set_run_font(r2, size=12)
+        set_run_font(r2, size=11)
 
     if city or date:
         p = doc.add_paragraph()
         p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        p.paragraph_format.space_before = Pt(10)
         text = f"{city}, {date}" if city and date else city or date
         r = p.add_run(text)
-        set_run_font(r, size=12)
+        set_run_font(r, size=11, color="555555")
 
     doc.add_page_break()
 
 
-def shade_cell(cell, fill="EDEDED"):
-    tcPr = cell._tc.get_or_add_tcPr()
-    shd = OxmlElement("w:shd")
-    shd.set(qn("w:fill"), fill)
-    tcPr.append(shd)
-
+# =========================
+# TABLAS / FIGURAS / GRÁFICOS
+# =========================
 
 def add_apa_table(doc: Document, table_data: dict):
     title = (table_data.get("title") or "").strip()
@@ -357,10 +433,10 @@ def add_apa_table(doc: Document, table_data: dict):
         p = doc.add_paragraph()
         p.alignment = WD_ALIGN_PARAGRAPH.LEFT
         p.paragraph_format.space_before = Pt(8)
-        p.paragraph_format.space_after = Pt(6)
+        p.paragraph_format.space_after = Pt(4)
         p.paragraph_format.first_line_indent = Inches(0)
         r = p.add_run(title)
-        set_run_font(r, size=12, italic=True)
+        set_run_font(r, size=11, italic=True)
 
     ncols = len(headers) if headers else (len(rows[0]) if rows else 0)
     if ncols == 0:
@@ -370,28 +446,30 @@ def add_apa_table(doc: Document, table_data: dict):
     table.alignment = WD_TABLE_ALIGNMENT.CENTER
     table.style = "Table Grid"
 
+    # Header row
     for i, header in enumerate(headers):
         cell = table.rows[0].cells[i]
         cell.text = ""
-        shade_cell(cell, "D9E2F3")
+        shade_cell(cell, "F2F2F2")
         cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
 
         p = cell.paragraphs[0]
         p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        p.paragraph_format.space_before = Pt(2)
-        p.paragraph_format.space_after = Pt(2)
+        p.paragraph_format.space_before = Pt(1)
+        p.paragraph_format.space_after = Pt(1)
 
         r = p.add_run(str(header))
-        set_run_font(r, size=11, bold=True)
+        set_run_font(r, size=10.5, bold=True)
 
         set_cell_border(
             cell,
             top={"sz": 10, "val": "single", "color": "808080"},
-            bottom={"sz": 10, "val": "single", "color": "808080"},
-            left={"sz": 6, "val": "single", "color": "B0B0B0"},
-            right={"sz": 6, "val": "single", "color": "B0B0B0"},
+            bottom={"sz": 8, "val": "single", "color": "808080"},
+            left={"val": "nil"},
+            right={"val": "nil"},
         )
 
+    # Data rows
     for row in rows:
         row_cells = table.add_row().cells
         for i, value in enumerate(row):
@@ -401,18 +479,18 @@ def add_apa_table(doc: Document, table_data: dict):
 
             p = cell.paragraphs[0]
             p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-            p.paragraph_format.space_before = Pt(2)
-            p.paragraph_format.space_after = Pt(2)
+            p.paragraph_format.space_before = Pt(1)
+            p.paragraph_format.space_after = Pt(1)
 
             r = p.add_run(str(value))
-            set_run_font(r, size=11)
+            set_run_font(r, size=10.5)
 
             set_cell_border(
                 cell,
-                top={"sz": 4, "val": "single", "color": "C8C8C8"},
-                bottom={"sz": 4, "val": "single", "color": "C8C8C8"},
-                left={"sz": 4, "val": "single", "color": "C8C8C8"},
-                right={"sz": 4, "val": "single", "color": "C8C8C8"},
+                top={"val": "nil"},
+                bottom={"sz": 4, "val": "single", "color": "D9D9D9"},
+                left={"val": "nil"},
+                right={"val": "nil"},
             )
 
     doc.add_paragraph()
@@ -425,7 +503,7 @@ def add_apa_table(doc: Document, table_data: dict):
         p.paragraph_format.first_line_indent = Inches(0)
         note_text = note if note.lower().startswith("nota.") else f"Nota. {note}"
         r = p.add_run(note_text)
-        set_run_font(r, size=10, italic=True, color="444444")
+        set_run_font(r, size=9.5, italic=True, color="555555")
 
 
 def add_figure_from_url(doc: Document, figure: dict):
@@ -438,7 +516,7 @@ def add_figure_from_url(doc: Document, figure: dict):
             p = doc.add_paragraph()
             p.alignment = WD_ALIGN_PARAGRAPH.CENTER
             p.paragraph_format.space_before = Pt(8)
-            p.paragraph_format.space_after = Pt(4)
+            p.paragraph_format.space_after = Pt(3)
             p.paragraph_format.first_line_indent = Inches(0)
             r = p.add_run(title)
             set_run_font(r, size=11, bold=True)
@@ -450,18 +528,18 @@ def add_figure_from_url(doc: Document, figure: dict):
         if caption:
             p = doc.add_paragraph()
             p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-            p.paragraph_format.space_before = Pt(4)
+            p.paragraph_format.space_before = Pt(3)
             p.paragraph_format.space_after = Pt(8)
             p.paragraph_format.first_line_indent = Inches(0)
             r = p.add_run(caption)
-            set_run_font(r, size=10, italic=True, color="444444")
+            set_run_font(r, size=9.5, italic=True, color="555555")
 
     except Exception as e:
         p = doc.add_paragraph()
         p.alignment = WD_ALIGN_PARAGRAPH.LEFT
         p.paragraph_format.first_line_indent = Inches(0)
         r = p.add_run(f"[No se pudo insertar la figura desde URL: {str(e)}]")
-        set_run_font(r, size=10, italic=True, color="AA0000")
+        set_run_font(r, size=9.5, italic=True, color="AA0000")
 
 
 def add_quickchart(doc: Document, chart: dict):
@@ -475,7 +553,7 @@ def add_quickchart(doc: Document, chart: dict):
             p = doc.add_paragraph()
             p.alignment = WD_ALIGN_PARAGRAPH.CENTER
             p.paragraph_format.space_before = Pt(8)
-            p.paragraph_format.space_after = Pt(4)
+            p.paragraph_format.space_after = Pt(3)
             p.paragraph_format.first_line_indent = Inches(0)
             r = p.add_run(title)
             set_run_font(r, size=11, bold=True)
@@ -485,8 +563,8 @@ def add_quickchart(doc: Document, chart: dict):
             json={
                 "chart": chart_config,
                 "format": "png",
-                "width": 900,
-                "height": 500,
+                "width": 1000,
+                "height": 550,
                 "backgroundColor": "white"
             },
             timeout=30,
@@ -501,18 +579,18 @@ def add_quickchart(doc: Document, chart: dict):
         if caption:
             p = doc.add_paragraph()
             p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-            p.paragraph_format.space_before = Pt(4)
+            p.paragraph_format.space_before = Pt(3)
             p.paragraph_format.space_after = Pt(8)
             p.paragraph_format.first_line_indent = Inches(0)
             r = p.add_run(caption)
-            set_run_font(r, size=10, italic=True, color="444444")
+            set_run_font(r, size=9.5, italic=True, color="555555")
 
     except Exception as e:
         p = doc.add_paragraph()
         p.alignment = WD_ALIGN_PARAGRAPH.LEFT
         p.paragraph_format.first_line_indent = Inches(0)
         r = p.add_run(f"[No se pudo insertar el gráfico: {str(e)}]")
-        set_run_font(r, size=10, italic=True, color="AA0000")
+        set_run_font(r, size=9.5, italic=True, color="AA0000")
 
 
 # =========================
@@ -523,15 +601,15 @@ def build_letter_doc(letter: LetterPayload) -> BytesIO:
     doc = Document()
     configure_document(doc)
 
-    add_logo(doc, letter.logo_url, width=1.0)
+    add_logo(doc, letter.logo_url, width=0.95)
 
     if letter.organization:
         p = doc.add_paragraph()
         p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        p.paragraph_format.space_after = Pt(12)
+        p.paragraph_format.space_after = Pt(10)
         p.paragraph_format.first_line_indent = Inches(0)
         r = p.add_run(letter.organization.upper())
-        set_run_font(r, size=13, bold=True)
+        set_run_font(r, size=12.5, bold=True)
 
     if letter.city_date:
         p = doc.add_paragraph()
@@ -550,7 +628,8 @@ def build_letter_doc(letter: LetterPayload) -> BytesIO:
             r = p.add_run(line)
             set_run_font(r, size=12)
 
-    doc.add_paragraph()
+    if any([letter.recipient_name, letter.recipient_title, letter.recipient_organization]):
+        doc.add_paragraph()
 
     if letter.subject:
         p = doc.add_paragraph()
@@ -578,7 +657,7 @@ def build_letter_doc(letter: LetterPayload) -> BytesIO:
 
     if letter.signature_name:
         p = doc.add_paragraph()
-        p.paragraph_format.space_before = Pt(24)
+        p.paragraph_format.space_before = Pt(20)
         p.paragraph_format.space_after = Pt(0)
         p.paragraph_format.first_line_indent = Inches(0)
         r = p.add_run(letter.signature_name)
@@ -611,8 +690,13 @@ def build_letter_doc(letter: LetterPayload) -> BytesIO:
 def build_report_doc(report: ReportPayload) -> BytesIO:
     doc = Document()
     configure_document(doc)
-    add_header_footer(doc, report.header_text, report.footer_text)
+
+    # Portada sin header/footer
     add_report_cover(doc, report.model_dump())
+
+    # Desde aquí, nueva sección para contenido con header/footer
+    section = doc.sections[-1]
+    add_header_footer(section, report.header_text, report.footer_text)
 
     if report.executive_summary:
         doc.add_heading("Resumen Ejecutivo", level=1)
@@ -620,29 +704,29 @@ def build_report_doc(report: ReportPayload) -> BytesIO:
             add_rich_text_paragraph(doc, paragraph)
 
     if report.sections:
-        for section in report.sections:
-            doc.add_heading(section.heading, level=section.level)
+        for section_item in report.sections:
+            doc.add_heading(section_item.heading, level=section_item.level)
 
-            if section.paragraphs:
-                for paragraph in section.paragraphs:
+            if section_item.paragraphs:
+                for paragraph in section_item.paragraphs:
                     add_rich_text_paragraph(doc, paragraph)
 
-            if section.bullets:
-                add_bullet_list(doc, section.bullets)
+            if section_item.bullets:
+                add_bullet_list(doc, section_item.bullets)
 
-            if section.numbered:
-                add_numbered_list(doc, section.numbered)
+            if section_item.numbered:
+                add_numbered_list(doc, section_item.numbered)
 
-            if section.tables:
-                for table in section.tables:
+            if section_item.tables:
+                for table in section_item.tables:
                     add_apa_table(doc, table.model_dump())
 
-            if section.figures:
-                for fig in section.figures:
+            if section_item.figures:
+                for fig in section_item.figures:
                     add_figure_from_url(doc, fig.model_dump())
 
-            if section.charts:
-                for chart in section.charts:
+            if section_item.charts:
+                for chart in section_item.charts:
                     add_quickchart(doc, chart.model_dump())
 
     if report.conclusions:
