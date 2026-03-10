@@ -1,12 +1,13 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
-from typing import List, Optional, Union, Any
+from typing import List, Optional, Union, Any, Tuple
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 from io import BytesIO
 import base64
 import binascii
+import os
 import re
 import requests
 
@@ -17,7 +18,10 @@ from docx.oxml import OxmlElement
 from docx.text.paragraph import Paragraph
 
 
-app = FastAPI(title="GPT DOC Backend", version="1.0.4 graceful-image-fallback")
+app = FastAPI(title="GPT DOC Backend", version="1.1.0 action-endpoint")
+
+
+DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 
 
 # =========================
@@ -255,7 +259,6 @@ def get_image_stream_from_url(url: str) -> BytesIO:
 
 
 def get_figure_image_stream(fig: FigureBlock) -> BytesIO:
-    # Prioridad total al base64 porque es el método más estable
     if fig.image_base64:
         return get_image_stream_from_base64(fig.image_base64)
 
@@ -438,7 +441,64 @@ def render_letter_body(document: Document, anchor_paragraph, payload: GenerateDo
 
 
 # =========================
-# ENDPOINT
+# GENERACIÓN CENTRAL
+# =========================
+
+def build_document_file(payload: GenerateDocumentRequest) -> Tuple[str, str]:
+    template_path = choose_template(payload.document_type)
+    document = Document(str(template_path))
+
+    body_anchor = find_paragraph_with_placeholder(document, "{{BODY_CONTENT}}")
+
+    common_replacements = {
+        "{{YEAR_MOTTO}}": payload.year_motto or "",
+        "{{DOCUMENT_CODE}}": payload.document_code or "",
+        "{{SUBJECT}}": payload.subject or "",
+        "{{REFERENCE_BLOCK}}": get_reference_text(payload),
+        "{{CITY_DATE}}": payload.city_date or "",
+        "{{FOOTER_BLOCK}}": join_lines(payload.footer_block),
+    }
+
+    doc_type = payload.document_type.lower()
+
+    if doc_type == "informe":
+        replacements = {
+            **common_replacements,
+            "{{ADDRESSEE}}": payload.addressee or "",
+        }
+        replace_placeholders_in_document(document, replacements)
+
+        if body_anchor:
+            render_report_body(document, body_anchor, payload)
+
+    elif doc_type == "carta":
+        replacements = {
+            **common_replacements,
+            "{{RECIPIENT_NAME}}": payload.recipient_name or "",
+            "{{RECIPIENT_POSITION}}": payload.recipient_position or "",
+            "{{RECIPIENT_INSTITUTION}}": payload.recipient_institution or "",
+            "{{CC_BLOCK}}": join_lines(payload.cc_block),
+        }
+        replace_placeholders_in_document(document, replacements)
+
+        if body_anchor:
+            render_letter_body(document, body_anchor, payload)
+
+    else:
+        raise HTTPException(status_code=400, detail="document_type debe ser 'carta' o 'informe'.")
+
+    clean_empty_paragraphs(document)
+
+    with NamedTemporaryFile(delete=False, suffix=".docx") as tmp:
+        output_path = tmp.name
+
+    document.save(output_path)
+    filename = f"{doc_type}_generado.docx"
+    return output_path, filename
+
+
+# =========================
+# ENDPOINTS
 # =========================
 
 @app.get("/")
@@ -449,57 +509,51 @@ def root():
 @app.post("/generate-document")
 def generate_document(payload: GenerateDocumentRequest):
     try:
-        template_path = choose_template(payload.document_type)
-        document = Document(str(template_path))
+        output_path, filename = build_document_file(payload)
 
-        body_anchor = find_paragraph_with_placeholder(document, "{{BODY_CONTENT}}")
-
-        common_replacements = {
-            "{{YEAR_MOTTO}}": payload.year_motto or "",
-            "{{DOCUMENT_CODE}}": payload.document_code or "",
-            "{{SUBJECT}}": payload.subject or "",
-            "{{REFERENCE_BLOCK}}": get_reference_text(payload),
-            "{{CITY_DATE}}": payload.city_date or "",
-            "{{FOOTER_BLOCK}}": join_lines(payload.footer_block),
-        }
-
-        if payload.document_type.lower() == "informe":
-            replacements = {
-                **common_replacements,
-                "{{ADDRESSEE}}": payload.addressee or "",
-            }
-            replace_placeholders_in_document(document, replacements)
-
-            if body_anchor:
-                render_report_body(document, body_anchor, payload)
-
-        elif payload.document_type.lower() == "carta":
-            replacements = {
-                **common_replacements,
-                "{{RECIPIENT_NAME}}": payload.recipient_name or "",
-                "{{RECIPIENT_POSITION}}": payload.recipient_position or "",
-                "{{RECIPIENT_INSTITUTION}}": payload.recipient_institution or "",
-                "{{CC_BLOCK}}": join_lines(payload.cc_block),
-            }
-            replace_placeholders_in_document(document, replacements)
-
-            if body_anchor:
-                render_letter_body(document, body_anchor, payload)
-
-        clean_empty_paragraphs(document)
-
-        with NamedTemporaryFile(delete=False, suffix=".docx") as tmp:
-            output_path = tmp.name
-
-        document.save(output_path)
-
-        filename = f"{payload.document_type.lower()}_generado.docx"
         return FileResponse(
             path=output_path,
             filename=filename,
-            media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+            media_type=DOCX_MIME
         )
 
     except Exception as e:
         detail = f"No se pudo generar el documento. Detalle técnico: {type(e).__name__}: {str(e)}"
         raise HTTPException(status_code=500, detail=detail)
+
+
+@app.post("/generate-document-action")
+def generate_document_action(payload: GenerateDocumentRequest):
+    output_path = None
+
+    try:
+        output_path, filename = build_document_file(payload)
+
+        with open(output_path, "rb") as f:
+            file_bytes = f.read()
+
+        file_b64 = base64.b64encode(file_bytes).decode("utf-8")
+
+        return {
+            "message": "Documento generado correctamente",
+            "document_type": payload.document_type.lower(),
+            "filename": filename,
+            "openaiFileResponse": [
+                {
+                    "name": filename,
+                    "mime_type": DOCX_MIME,
+                    "content": file_b64
+                }
+            ]
+        }
+
+    except Exception as e:
+        detail = f"No se pudo generar el documento para action. Detalle técnico: {type(e).__name__}: {str(e)}"
+        raise HTTPException(status_code=500, detail=detail)
+
+    finally:
+        if output_path and os.path.exists(output_path):
+            try:
+                os.remove(output_path)
+            except Exception:
+                pass
