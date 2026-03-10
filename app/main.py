@@ -3,6 +3,7 @@ from fastapi.responses import StreamingResponse, JSONResponse
 from pydantic import BaseModel, Field
 from typing import List, Optional, Literal, Union
 from io import BytesIO
+from pathlib import Path
 from PIL import Image
 from docx import Document
 from docx.shared import Inches, Pt, RGBColor
@@ -15,9 +16,13 @@ import requests
 
 app = FastAPI(
     title="GPT Doc Backend",
-    version="0.8.0",
-    description="Backend para generación de cartas e informes profesionales en formato Word (.docx)."
+    version="0.9.0",
+    description="Backend para generación de cartas e informes profesionales usando plantilla DOCX."
 )
+
+BASE_DIR = Path(__file__).resolve().parent.parent
+TEMPLATE_DIR = BASE_DIR / "templates"
+REPORT_TEMPLATE_PATH = TEMPLATE_DIR / "professional_report_template.docx"
 
 
 # =========================
@@ -194,78 +199,70 @@ def add_page_number(paragraph):
     run._r.append(fld_char2)
 
 
-def add_horizontal_rule(paragraph, color="C8C8C8", size="5"):
-    p = paragraph._p
-    pPr = p.get_or_add_pPr()
-    pbdr = pPr.find(qn("w:pBdr"))
-    if pbdr is None:
-        pbdr = OxmlElement("w:pBdr")
-        pPr.append(pbdr)
+# =========================
+# HELPERS DE PLANTILLA
+# =========================
 
-    bottom = pbdr.find(qn("w:bottom"))
-    if bottom is None:
-        bottom = OxmlElement("w:bottom")
-        pbdr.append(bottom)
+def replace_placeholder_in_paragraph(paragraph, placeholder: str, value: str):
+    full_text = "".join(run.text for run in paragraph.runs)
+    if placeholder not in full_text:
+        return False
 
-    bottom.set(qn("w:val"), "single")
-    bottom.set(qn("w:sz"), size)
-    bottom.set(qn("w:space"), "1")
-    bottom.set(qn("w:color"), color)
+    new_text = full_text.replace(placeholder, value)
+
+    for run in paragraph.runs:
+        run.text = ""
+
+    if paragraph.runs:
+        paragraph.runs[0].text = new_text
+    else:
+        paragraph.add_run(new_text)
+
+    return True
+
+
+def replace_placeholder_everywhere(doc: Document, placeholder: str, value: str):
+    for paragraph in doc.paragraphs:
+        replace_placeholder_in_paragraph(paragraph, placeholder, value)
+
+    for table in doc.tables:
+        for row in table.rows:
+            for cell in row.cells:
+                for paragraph in cell.paragraphs:
+                    replace_placeholder_in_paragraph(paragraph, placeholder, value)
+
+
+def find_paragraph_with_placeholder(doc: Document, placeholder: str):
+    for paragraph in doc.paragraphs:
+        text = "".join(run.text for run in paragraph.runs)
+        if placeholder in text:
+            return paragraph
+    return None
+
+
+def clear_paragraph(paragraph):
+    for run in paragraph.runs:
+        run.text = ""
+
+
+def insert_paragraph_after(paragraph, text="", style=None):
+    new_p = OxmlElement("w:p")
+    paragraph._p.addnext(new_p)
+    new_para = paragraph._parent.add_paragraph()
+    new_para._p = new_p
+    if style:
+        new_para.style = style
+    if text:
+        new_para.add_run(text)
+    return new_para
 
 
 # =========================
-# ESTILO GENERAL
+# ESTILO DE CONTENIDO
 # =========================
 
-def configure_document(doc: Document):
-    section = doc.sections[0]
-    section.top_margin = Inches(0.9)
-    section.bottom_margin = Inches(0.8)
-    section.left_margin = Inches(1.0)
-    section.right_margin = Inches(0.9)
-
-    normal = doc.styles["Normal"]
-    normal.font.name = "Times New Roman"
-    normal._element.rPr.rFonts.set(qn("w:eastAsia"), "Times New Roman")
-    normal.font.size = Pt(11)
-    normal.paragraph_format.line_spacing = 1.15
-    normal.paragraph_format.space_after = Pt(4)
-    normal.paragraph_format.space_before = Pt(0)
-    normal.paragraph_format.first_line_indent = Inches(0.22)
-
-    styles = [
-        ("Heading 1", 13, False, Pt(10), Pt(4)),
-        ("Heading 2", 12, False, Pt(8), Pt(4)),
-        ("Heading 3", 11.5, False, Pt(7), Pt(3)),
-        ("Heading 4", 11, True, Pt(6), Pt(3)),
-    ]
-
-    for style_name, size, italic, before, after in styles:
-        style = doc.styles[style_name]
-        style.font.name = "Times New Roman"
-        style._element.rPr.rFonts.set(qn("w:eastAsia"), "Times New Roman")
-        style.font.size = Pt(size)
-        style.font.bold = True
-        style.font.italic = italic
-        style.paragraph_format.space_before = before
-        style.paragraph_format.space_after = after
-        style.paragraph_format.line_spacing = 1.05
-        style.paragraph_format.first_line_indent = Inches(0)
-
-
-def add_logo(doc: Document, logo_url: Optional[str], width=0.85):
-    if not logo_url:
-        return
-    try:
-        stream = safe_fetch_image(logo_url)
-        doc.add_picture(stream, width=Inches(width))
-        doc.paragraphs[-1].alignment = WD_ALIGN_PARAGRAPH.CENTER
-    except Exception:
-        pass
-
-
-def add_rich_text_paragraph(doc: Document, text: str, align=WD_ALIGN_PARAGRAPH.JUSTIFY, first_indent=True):
-    p = doc.add_paragraph()
+def add_rich_text_after(anchor_paragraph, text: str, align=WD_ALIGN_PARAGRAPH.JUSTIFY, first_indent=True):
+    p = insert_paragraph_after(anchor_paragraph)
     p.alignment = align
     p.paragraph_format.line_spacing = 1.15
     p.paragraph_format.space_after = Pt(4)
@@ -279,193 +276,53 @@ def add_rich_text_paragraph(doc: Document, text: str, align=WD_ALIGN_PARAGRAPH.J
     return p
 
 
-def add_bullet_list(doc: Document, items: List[str]):
-    for item in items:
-        p = doc.add_paragraph()
-        p.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
-        p.paragraph_format.line_spacing = 1.1
-        p.paragraph_format.space_after = Pt(2)
-        p.paragraph_format.space_before = Pt(0)
-        p.paragraph_format.left_indent = Inches(0.25)
-        p.paragraph_format.first_line_indent = Inches(-0.16)
-
-        bullet_run = p.add_run("• ")
-        set_run_font(bullet_run, size=10.5, bold=True, color="404040")
-
-        parts = item.split("**")
-        for i, part in enumerate(parts):
-            run = p.add_run(part)
-            set_run_font(run, size=10.5, bold=(i % 2 == 1))
+def add_heading_after(anchor_paragraph, text: str, level: int):
+    style_name = f"Heading {min(level, 4)}"
+    p = insert_paragraph_after(anchor_paragraph, style=style_name)
+    p.alignment = WD_ALIGN_PARAGRAPH.LEFT
+    p.paragraph_format.first_line_indent = Inches(0)
+    run = p.add_run(text)
+    return p
 
 
-def add_numbered_list(doc: Document, items: List[str]):
-    for idx, item in enumerate(items, start=1):
-        p = doc.add_paragraph()
-        p.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
-        p.paragraph_format.line_spacing = 1.1
-        p.paragraph_format.space_after = Pt(2)
-        p.paragraph_format.space_before = Pt(0)
-        p.paragraph_format.left_indent = Inches(0.27)
-        p.paragraph_format.first_line_indent = Inches(-0.19)
+def add_bullet_after(anchor_paragraph, text: str):
+    p = insert_paragraph_after(anchor_paragraph)
+    p.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
+    p.paragraph_format.line_spacing = 1.1
+    p.paragraph_format.space_after = Pt(2)
+    p.paragraph_format.left_indent = Inches(0.25)
+    p.paragraph_format.first_line_indent = Inches(-0.16)
 
-        prefix = p.add_run(f"{idx}. ")
-        set_run_font(prefix, size=10.5, bold=True, color="404040")
+    bullet_run = p.add_run("• ")
+    set_run_font(bullet_run, size=10.5, bold=True, color="404040")
 
-        parts = item.split("**")
-        for i, part in enumerate(parts):
-            run = p.add_run(part)
-            set_run_font(run, size=10.5, bold=(i % 2 == 1))
-
-
-# =========================
-# HEADER / FOOTER
-# =========================
-
-def add_header_footer(section, header_text: Optional[str], footer_text: Optional[str]):
-    if header_text:
-        hp = section.header.paragraphs[0]
-        hp.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        hp.text = ""
-        run = hp.add_run(header_text)
-        set_run_font(run, size=8, italic=True, color="6F6F6F")
-
-    fp = section.footer.paragraphs[0]
-    fp.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    fp.text = ""
-
-    if footer_text:
-        left = fp.add_run(footer_text)
-        set_run_font(left, size=8, color="6F6F6F")
-        sep = fp.add_run("  |  ")
-        set_run_font(sep, size=8, color="A5A5A5")
-
-    page_label = fp.add_run("Página ")
-    set_run_font(page_label, size=8, color="6F6F6F")
-    add_page_number(fp)
+    parts = text.split("**")
+    for i, part in enumerate(parts):
+        run = p.add_run(part)
+        set_run_font(run, size=10.5, bold=(i % 2 == 1))
+    return p
 
 
-# =========================
-# PORTADA Y PRELIMINARES
-# =========================
+def add_numbered_after(anchor_paragraph, idx: int, text: str):
+    p = insert_paragraph_after(anchor_paragraph)
+    p.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
+    p.paragraph_format.line_spacing = 1.1
+    p.paragraph_format.space_after = Pt(2)
+    p.paragraph_format.left_indent = Inches(0.27)
+    p.paragraph_format.first_line_indent = Inches(-0.19)
 
-def add_report_cover(doc: Document, report: dict):
-    add_logo(doc, report.get("logo_url"), width=0.82)
+    prefix = p.add_run(f"{idx}. ")
+    set_run_font(prefix, size=10.5, bold=True, color="404040")
 
-    institution = (report.get("institution") or "").strip()
-    faculty = (report.get("faculty") or "").strip()
-    department = (report.get("department") or "").strip()
-    report_kind = (report.get("report_kind") or "Informe").strip()
-    title = (report.get("title") or "").strip()
-    subtitle = (report.get("subtitle") or "").strip()
-    author = (report.get("author") or "").strip()
-    reviewer = (report.get("reviewer") or "").strip()
-    city = (report.get("city") or "").strip()
-    date = (report.get("date") or "").strip()
-
-    if institution:
-        p = doc.add_paragraph()
-        p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        p.paragraph_format.space_before = Pt(3)
-        p.paragraph_format.space_after = Pt(1)
-        r = p.add_run(institution.upper())
-        set_run_font(r, size=11, bold=True)
-
-    if faculty:
-        p = doc.add_paragraph()
-        p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        p.paragraph_format.space_after = Pt(1)
-        r = p.add_run(faculty)
-        set_run_font(r, size=10.5, bold=True)
-
-    if department:
-        p = doc.add_paragraph()
-        p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        p.paragraph_format.space_after = Pt(5)
-        r = p.add_run(department)
-        set_run_font(r, size=9.5, color="555555")
-
-    sep = doc.add_paragraph()
-    sep.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    sep.paragraph_format.space_after = Pt(4)
-    add_horizontal_rule(sep, color="C6C6C6", size="5")
-
-    p = doc.add_paragraph()
-    p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    p.paragraph_format.space_after = Pt(4)
-    r = p.add_run(report_kind.upper())
-    set_run_font(r, size=11, bold=True, color="404040")
-
-    if title:
-        p = doc.add_paragraph()
-        p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        p.paragraph_format.space_after = Pt(4)
-        r = p.add_run(title)
-        set_run_font(r, size=14, bold=True)
-
-    if subtitle:
-        p = doc.add_paragraph()
-        p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        p.paragraph_format.space_after = Pt(7)
-        r = p.add_run(subtitle)
-        set_run_font(r, size=10, italic=True, color="555555")
-
-    if author:
-        p = doc.add_paragraph()
-        p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        p.paragraph_format.space_after = Pt(1)
-        r1 = p.add_run("Autor: ")
-        set_run_font(r1, size=10, bold=True)
-        r2 = p.add_run(author)
-        set_run_font(r2, size=10)
-
-    if reviewer:
-        p = doc.add_paragraph()
-        p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        p.paragraph_format.space_after = Pt(1)
-        r1 = p.add_run("Revisor / Asesor: ")
-        set_run_font(r1, size=10, bold=True)
-        r2 = p.add_run(reviewer)
-        set_run_font(r2, size=10)
-
-    if city or date:
-        p = doc.add_paragraph()
-        p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        p.paragraph_format.space_before = Pt(4)
-        text = f"{city}, {date}" if city and date else city or date
-        r = p.add_run(text)
-        set_run_font(r, size=9.5, color="555555")
-
-    doc.add_page_break()
+    parts = text.split("**")
+    for i, part in enumerate(parts):
+        run = p.add_run(part)
+        set_run_font(run, size=10.5, bold=(i % 2 == 1))
+    return p
 
 
-def add_generated_index_page(doc: Document, title: str, entries: List[str]):
-    doc.add_heading(title, level=1)
-
-    if not entries:
-        p = doc.add_paragraph()
-        p.alignment = WD_ALIGN_PARAGRAPH.LEFT
-        p.paragraph_format.first_line_indent = Inches(0)
-        r = p.add_run("No se registraron elementos en esta sección.")
-        set_run_font(r, size=10, italic=True, color="666666")
-    else:
-        for entry in entries:
-            p = doc.add_paragraph()
-            p.alignment = WD_ALIGN_PARAGRAPH.LEFT
-            p.paragraph_format.space_before = Pt(0)
-            p.paragraph_format.space_after = Pt(2)
-            p.paragraph_format.first_line_indent = Inches(0)
-            r = p.add_run(entry)
-            set_run_font(r, size=10.2)
-
-    doc.add_page_break()
-
-
-# =========================
-# CAPTIONS Y REGISTRO
-# =========================
-
-def add_caption(doc: Document, label: str, number: int, caption_text: str):
-    p = doc.add_paragraph()
+def add_caption_after(anchor_paragraph, label: str, number: int, caption_text: str):
+    p = insert_paragraph_after(anchor_paragraph)
     p.alignment = WD_ALIGN_PARAGRAPH.CENTER
     p.paragraph_format.space_before = Pt(3)
     p.paragraph_format.space_after = Pt(6)
@@ -476,7 +333,6 @@ def add_caption(doc: Document, label: str, number: int, caption_text: str):
 
     r2 = p.add_run(caption_text)
     set_run_font(r2, size=9.5, italic=True, color="555555")
-
     return p
 
 
@@ -484,20 +340,28 @@ def add_caption(doc: Document, label: str, number: int, caption_text: str):
 # TABLAS / FIGURAS / GRÁFICOS
 # =========================
 
-def add_apa_table(doc: Document, table_data: dict, table_number: int):
+def add_table_after(anchor_paragraph, table_data: dict, table_number: int, doc: Document):
     title = (table_data.get("title") or "").strip()
     headers = table_data.get("headers", [])
     rows = table_data.get("rows", [])
     note = (table_data.get("note") or "").strip()
 
+    current = anchor_paragraph
+
     if title:
-        add_caption(doc, "Tabla", table_number, title)
+        current = add_caption_after(current, "Tabla", table_number, title)
 
     ncols = len(headers) if headers else (len(rows[0]) if rows else 0)
     if ncols == 0:
-        return
+        return current
+
+    tbl_p = OxmlElement("w:p")
+    current._p.addnext(tbl_p)
 
     table = doc.add_table(rows=1, cols=ncols)
+    tbl_xml = table._tbl
+    current._p.addnext(tbl_xml)
+
     table.alignment = WD_TABLE_ALIGNMENT.CENTER
     table.style = "Table Grid"
 
@@ -549,70 +413,77 @@ def add_apa_table(doc: Document, table_data: dict, table_number: int):
                 right={"val": "nil"},
             )
 
-    spacer = doc.add_paragraph()
-    spacer.paragraph_format.space_before = Pt(1)
-    spacer.paragraph_format.space_after = Pt(0)
-    spacer.paragraph_format.first_line_indent = Inches(0)
+    after_para = insert_paragraph_after(current)
+    after_para.paragraph_format.first_line_indent = Inches(0)
+    after_para.paragraph_format.space_before = Pt(1)
+    after_para.paragraph_format.space_after = Pt(0)
+    current = after_para
 
     if note:
-        p = doc.add_paragraph()
-        p.alignment = WD_ALIGN_PARAGRAPH.LEFT
-        p.paragraph_format.space_before = Pt(1)
-        p.paragraph_format.space_after = Pt(6)
-        p.paragraph_format.first_line_indent = Inches(0)
-        note_text = note if note.lower().startswith("nota.") else f"Nota. {note}"
-        r = p.add_run(note_text)
-        set_run_font(r, size=9, italic=True, color="555555")
+        current = add_rich_text_after(current, note if note.lower().startswith("Nota.") else f"Nota. {note}", align=WD_ALIGN_PARAGRAPH.LEFT, first_indent=False)
+        if current.runs:
+            for run in current.runs:
+                set_run_font(run, size=9, italic=True, color="555555")
+
+    return current
 
 
-def add_figure_from_url(doc: Document, figure: dict, figure_number: int):
-    try:
-        title = figure.get("title")
-        caption = figure.get("caption")
-        width_inches = figure.get("width_inches", 5.8)
+def add_figure_after(anchor_paragraph, figure: dict, figure_number: int, doc: Document):
+    title = figure.get("title")
+    caption = figure.get("caption")
+    width_inches = figure.get("width_inches", 5.8)
+    current = anchor_paragraph
 
-        if title:
-            p = doc.add_paragraph()
-            p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-            p.paragraph_format.space_before = Pt(5)
-            p.paragraph_format.space_after = Pt(2)
-            p.paragraph_format.first_line_indent = Inches(0)
-            r = p.add_run(title)
-            set_run_font(r, size=10.5, bold=True)
-
-        image_stream = safe_fetch_image(figure["url"], max_width=2600)
-        doc.add_picture(image_stream, width=Inches(width_inches))
-        doc.paragraphs[-1].alignment = WD_ALIGN_PARAGRAPH.CENTER
-
-        if caption:
-            add_caption(doc, "Figura", figure_number, caption)
-
-    except Exception:
-        p = doc.add_paragraph()
+    if title:
+        p = insert_paragraph_after(current)
         p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        p.paragraph_format.space_before = Pt(3)
-        p.paragraph_format.space_after = Pt(6)
+        p.paragraph_format.space_before = Pt(5)
+        p.paragraph_format.space_after = Pt(2)
+        p.paragraph_format.first_line_indent = Inches(0)
+        r = p.add_run(title)
+        set_run_font(r, size=10.5, bold=True)
+        current = p
+
+    try:
+        image_stream = safe_fetch_image(figure["url"], max_width=2600)
+
+        img_p = insert_paragraph_after(current)
+        img_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        img_p.paragraph_format.first_line_indent = Inches(0)
+        img_p.add_run().add_picture(image_stream, width=Inches(width_inches))
+        current = img_p
+    except Exception:
+        p = insert_paragraph_after(current)
+        p.alignment = WD_ALIGN_PARAGRAPH.CENTER
         p.paragraph_format.first_line_indent = Inches(0)
         r = p.add_run("[Imagen no disponible en esta prueba]")
         set_run_font(r, size=9.5, italic=True, color="777777")
+        current = p
+
+    if caption:
+        current = add_caption_after(current, "Figura", figure_number, caption)
+
+    return current
 
 
-def add_quickchart(doc: Document, chart: dict, figure_number: int):
+def add_chart_after(anchor_paragraph, chart: dict, figure_number: int):
+    title = chart.get("title")
+    caption = chart.get("caption")
+    width_inches = chart.get("width_inches", 5.8)
+    chart_config = chart["chart_config"]
+    current = anchor_paragraph
+
+    if title:
+        p = insert_paragraph_after(current)
+        p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        p.paragraph_format.space_before = Pt(5)
+        p.paragraph_format.space_after = Pt(2)
+        p.paragraph_format.first_line_indent = Inches(0)
+        r = p.add_run(title)
+        set_run_font(r, size=10.5, bold=True)
+        current = p
+
     try:
-        title = chart.get("title")
-        caption = chart.get("caption")
-        width_inches = chart.get("width_inches", 5.8)
-        chart_config = chart["chart_config"]
-
-        if title:
-            p = doc.add_paragraph()
-            p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-            p.paragraph_format.space_before = Pt(5)
-            p.paragraph_format.space_after = Pt(2)
-            p.paragraph_format.first_line_indent = Inches(0)
-            r = p.add_run(title)
-            set_run_font(r, size=10.5, bold=True)
-
         response = requests.post(
             "https://quickchart.io/chart",
             json={
@@ -631,121 +502,30 @@ def add_quickchart(doc: Document, chart: dict, figure_number: int):
         image_stream = BytesIO(response.content)
         image_stream = normalize_image_stream(image_stream, max_width=2600)
 
-        doc.add_picture(image_stream, width=Inches(width_inches))
-        doc.paragraphs[-1].alignment = WD_ALIGN_PARAGRAPH.CENTER
-
-        if caption:
-            add_caption(doc, "Figura", figure_number, caption)
-
+        img_p = insert_paragraph_after(current)
+        img_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        img_p.paragraph_format.first_line_indent = Inches(0)
+        img_p.add_run().add_picture(image_stream, width=Inches(width_inches))
+        current = img_p
     except Exception:
-        p = doc.add_paragraph()
+        p = insert_paragraph_after(current)
         p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        p.paragraph_format.space_before = Pt(3)
-        p.paragraph_format.space_after = Pt(6)
         p.paragraph_format.first_line_indent = Inches(0)
         r = p.add_run("[Gráfico no disponible en esta prueba]")
         set_run_font(r, size=9.5, italic=True, color="777777")
+        current = p
+
+    if caption:
+        current = add_caption_after(current, "Figura", figure_number, caption)
+
+    return current
 
 
 # =========================
-# CARTA
+# ÍNDICES GENERADOS
 # =========================
 
-def build_letter_doc(letter: LetterPayload) -> BytesIO:
-    doc = Document()
-    configure_document(doc)
-
-    add_logo(doc, letter.logo_url, width=0.82)
-
-    if letter.organization:
-        p = doc.add_paragraph()
-        p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        p.paragraph_format.space_after = Pt(8)
-        p.paragraph_format.first_line_indent = Inches(0)
-        r = p.add_run(letter.organization.upper())
-        set_run_font(r, size=11.5, bold=True)
-
-    if letter.city_date:
-        p = doc.add_paragraph()
-        p.alignment = WD_ALIGN_PARAGRAPH.RIGHT
-        p.paragraph_format.space_after = Pt(10)
-        p.paragraph_format.first_line_indent = Inches(0)
-        r = p.add_run(letter.city_date)
-        set_run_font(r, size=11)
-
-    for line in [letter.recipient_name, letter.recipient_title, letter.recipient_organization]:
-        if line:
-            p = doc.add_paragraph()
-            p.alignment = WD_ALIGN_PARAGRAPH.LEFT
-            p.paragraph_format.space_after = Pt(0)
-            p.paragraph_format.first_line_indent = Inches(0)
-            r = p.add_run(line)
-            set_run_font(r, size=11)
-
-    if any([letter.recipient_name, letter.recipient_title, letter.recipient_organization]):
-        doc.add_paragraph()
-
-    if letter.subject:
-        p = doc.add_paragraph()
-        p.alignment = WD_ALIGN_PARAGRAPH.LEFT
-        p.paragraph_format.space_after = Pt(8)
-        p.paragraph_format.first_line_indent = Inches(0)
-        r1 = p.add_run("Asunto: ")
-        set_run_font(r1, size=11, bold=True)
-        r2 = p.add_run(letter.subject)
-        set_run_font(r2, size=11)
-
-    if letter.greeting:
-        p = doc.add_paragraph()
-        p.alignment = WD_ALIGN_PARAGRAPH.LEFT
-        p.paragraph_format.space_after = Pt(8)
-        p.paragraph_format.first_line_indent = Inches(0)
-        r = p.add_run(letter.greeting)
-        set_run_font(r, size=11)
-
-    for paragraph in letter.body:
-        add_rich_text_paragraph(doc, paragraph)
-
-    if letter.closing:
-        add_rich_text_paragraph(doc, letter.closing)
-
-    if letter.signature_name:
-        p = doc.add_paragraph()
-        p.paragraph_format.space_before = Pt(16)
-        p.paragraph_format.space_after = Pt(0)
-        p.paragraph_format.first_line_indent = Inches(0)
-        r = p.add_run(letter.signature_name)
-        set_run_font(r, size=11, bold=True)
-
-    if letter.signature_title:
-        p = doc.add_paragraph()
-        p.paragraph_format.space_after = Pt(10)
-        p.paragraph_format.first_line_indent = Inches(0)
-        r = p.add_run(letter.signature_title)
-        set_run_font(r, size=11)
-
-    if letter.annexes:
-        p = doc.add_paragraph()
-        p.paragraph_format.first_line_indent = Inches(0)
-        r = p.add_run("Anexos:")
-        set_run_font(r, size=11, bold=True)
-        add_bullet_list(doc, letter.annexes)
-
-    output = BytesIO()
-    doc.save(output)
-    output.seek(0)
-    return output
-
-
-# =========================
-# INFORME
-# =========================
-
-def build_report_doc(report: ReportPayload) -> BytesIO:
-    doc = Document()
-    configure_document(doc)
-
-    # Recolectar índices previos de backend
+def build_indexes(report: ReportPayload):
     toc_entries: List[str] = []
     table_index_entries: List[str] = []
     figure_index_entries: List[str] = []
@@ -764,19 +544,19 @@ def build_report_doc(report: ReportPayload) -> BytesIO:
             if section_item.tables:
                 for table in section_item.tables:
                     table_counter += 1
-                    table_title = (table.title or f"Tabla sin título {table_counter}").strip()
-                    table_index_entries.append(f"Tabla {table_counter}. {table_title}")
+                    title = (table.title or f"Tabla {table_counter}").strip()
+                    table_index_entries.append(f"Tabla {table_counter}. {title}")
 
             if section_item.figures:
                 for fig in section_item.figures:
                     figure_counter += 1
-                    caption = (fig.caption or fig.title or f"Figura sin título {figure_counter}").strip()
+                    caption = (fig.caption or fig.title or f"Figura {figure_counter}").strip()
                     figure_index_entries.append(f"Figura {figure_counter}. {caption}")
 
             if section_item.charts:
                 for chart in section_item.charts:
                     figure_counter += 1
-                    caption = (chart.caption or chart.title or f"Gráfico sin título {figure_counter}").strip()
+                    caption = (chart.caption or chart.title or f"Figura {figure_counter}").strip()
                     figure_index_entries.append(f"Figura {figure_counter}. {caption}")
 
     if report.conclusions:
@@ -786,75 +566,229 @@ def build_report_doc(report: ReportPayload) -> BytesIO:
     if report.references:
         toc_entries.append("Referencias")
 
-    # Portada
-    add_report_cover(doc, report.model_dump())
+    return toc_entries, table_index_entries, figure_index_entries
 
-    # Índices generados por backend
-    add_generated_index_page(doc, "Índice general", toc_entries)
-    add_generated_index_page(doc, "Índice de tablas", table_index_entries)
-    add_generated_index_page(doc, "Índice de figuras", figure_index_entries)
 
-    section = doc.sections[-1]
-    add_header_footer(section, report.header_text, report.footer_text)
+# =========================
+# INFORME CON PLANTILLA
+# =========================
 
-    # Reset contadores para render final
-    figure_counter = 0
-    table_counter = 0
+def build_report_doc(report: ReportPayload) -> BytesIO:
+    if not REPORT_TEMPLATE_PATH.exists():
+        raise FileNotFoundError(
+            f"No se encontró la plantilla: {REPORT_TEMPLATE_PATH}. "
+            "Cree el archivo templates/professional_report_template.docx"
+        )
 
+    doc = Document(str(REPORT_TEMPLATE_PATH))
+
+    # Reemplazos directos de portada
+    replace_placeholder_everywhere(doc, "{{INSTITUTION}}", report.institution or "")
+    replace_placeholder_everywhere(doc, "{{FACULTY}}", report.faculty or "")
+    replace_placeholder_everywhere(doc, "{{DEPARTMENT}}", report.department or "")
+    replace_placeholder_everywhere(doc, "{{REPORT_KIND}}", report.report_kind or "")
+    replace_placeholder_everywhere(doc, "{{TITLE}}", report.title or "")
+    replace_placeholder_everywhere(doc, "{{SUBTITLE}}", report.subtitle or "")
+    replace_placeholder_everywhere(doc, "{{AUTHOR}}", report.author or "")
+    replace_placeholder_everywhere(doc, "{{REVIEWER}}", report.reviewer or "")
+    city_date = f"{report.city}, {report.date}" if report.city and report.date else (report.city or report.date or "")
+    replace_placeholder_everywhere(doc, "{{CITY_DATE}}", city_date)
+
+    # Índices
+    toc_entries, table_index_entries, figure_index_entries = build_indexes(report)
+
+    replace_placeholder_everywhere(doc, "{{TOC}}", "\n".join(toc_entries) if toc_entries else "No se registraron secciones.")
+    replace_placeholder_everywhere(doc, "{{TABLE_INDEX}}", "\n".join(table_index_entries) if table_index_entries else "No se registraron tablas.")
+    replace_placeholder_everywhere(doc, "{{FIGURE_INDEX}}", "\n".join(figure_index_entries) if figure_index_entries else "No se registraron figuras.")
+
+    # Header / Footer
+    for section in doc.sections:
+        if report.header_text:
+            hp = section.header.paragraphs[0]
+            hp.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            hp.text = ""
+            run = hp.add_run(report.header_text)
+            set_run_font(run, size=8, italic=True, color="6F6F6F")
+
+        fp = section.footer.paragraphs[0]
+        fp.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        fp.text = ""
+        if report.footer_text:
+            left = fp.add_run(report.footer_text)
+            set_run_font(left, size=8, color="6F6F6F")
+            sep = fp.add_run("  |  ")
+            set_run_font(sep, size=8, color="A5A5A5")
+        page_label = fp.add_run("Página ")
+        set_run_font(page_label, size=8, color="6F6F6F")
+        add_page_number(fp)
+
+    body_anchor = find_paragraph_with_placeholder(doc, "{{BODY_CONTENT}}")
+    if body_anchor is None:
+        raise ValueError("La plantilla no contiene el marcador {{BODY_CONTENT}}")
+
+    clear_paragraph(body_anchor)
+    current = body_anchor
+
+    # Resumen ejecutivo
     if report.executive_summary:
-        doc.add_heading("Resumen Ejecutivo", level=1)
+        current = add_heading_after(current, "Resumen Ejecutivo", 1)
         for paragraph in report.executive_summary:
-            add_rich_text_paragraph(doc, paragraph)
+            current = add_rich_text_after(current, paragraph)
+
+    # Contenido principal
+    table_counter = 0
+    figure_counter = 0
 
     if report.sections:
         for section_item in report.sections:
-            doc.add_heading(section_item.heading, level=section_item.level)
+            current = add_heading_after(current, section_item.heading, section_item.level)
 
             if section_item.paragraphs:
                 for paragraph in section_item.paragraphs:
-                    add_rich_text_paragraph(doc, paragraph)
+                    current = add_rich_text_after(current, paragraph)
 
             if section_item.bullets:
-                add_bullet_list(doc, section_item.bullets)
+                for item in section_item.bullets:
+                    current = add_bullet_after(current, item)
 
             if section_item.numbered:
-                add_numbered_list(doc, section_item.numbered)
+                for idx, item in enumerate(section_item.numbered, start=1):
+                    current = add_numbered_after(current, idx, item)
 
             if section_item.tables:
                 for table in section_item.tables:
                     table_counter += 1
-                    add_apa_table(doc, table.model_dump(), table_counter)
+                    current = add_table_after(current, table.model_dump(), table_counter, doc)
 
             if section_item.figures:
                 for fig in section_item.figures:
                     figure_counter += 1
-                    add_figure_from_url(doc, fig.model_dump(), figure_counter)
+                    current = add_figure_after(current, fig.model_dump(), figure_counter, doc)
 
             if section_item.charts:
                 for chart in section_item.charts:
                     figure_counter += 1
-                    add_quickchart(doc, chart.model_dump(), figure_counter)
+                    current = add_chart_after(current, chart.model_dump(), figure_counter)
 
     if report.conclusions:
-        doc.add_heading("Conclusiones", level=1)
-        add_numbered_list(doc, report.conclusions)
+        current = add_heading_after(current, "Conclusiones", 1)
+        for idx, item in enumerate(report.conclusions, start=1):
+            current = add_numbered_after(current, idx, item)
 
     if report.recommendations:
-        doc.add_heading("Recomendaciones", level=1)
-        add_numbered_list(doc, report.recommendations)
+        current = add_heading_after(current, "Recomendaciones", 1)
+        for idx, item in enumerate(report.recommendations, start=1):
+            current = add_numbered_after(current, idx, item)
 
     if report.references:
-        doc.add_heading("Referencias", level=1)
+        current = add_heading_after(current, "Referencias", 1)
         for ref in report.references:
-            p = doc.add_paragraph()
+            p = insert_paragraph_after(current)
             p.alignment = WD_ALIGN_PARAGRAPH.LEFT
             p.paragraph_format.line_spacing = 1.15
             p.paragraph_format.space_after = Pt(4)
             p.paragraph_format.space_before = Pt(0)
             p.paragraph_format.left_indent = Inches(0.34)
             p.paragraph_format.first_line_indent = Inches(-0.34)
-
             r = p.add_run(ref)
+            set_run_font(r, size=10.5)
+            current = p
+
+    output = BytesIO()
+    doc.save(output)
+    output.seek(0)
+    return output
+
+
+# =========================
+# CARTA SIMPLE
+# =========================
+
+def build_letter_doc(letter: LetterPayload) -> BytesIO:
+    doc = Document()
+
+    section = doc.sections[0]
+    section.top_margin = Inches(0.9)
+    section.bottom_margin = Inches(0.8)
+    section.left_margin = Inches(1.0)
+    section.right_margin = Inches(0.9)
+
+    if letter.organization:
+        p = doc.add_paragraph()
+        p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        r = p.add_run(letter.organization.upper())
+        set_run_font(r, size=11.5, bold=True)
+
+    if letter.city_date:
+        p = doc.add_paragraph()
+        p.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+        r = p.add_run(letter.city_date)
+        set_run_font(r, size=11)
+
+    for line in [letter.recipient_name, letter.recipient_title, letter.recipient_organization]:
+        if line:
+            p = doc.add_paragraph()
+            p.alignment = WD_ALIGN_PARAGRAPH.LEFT
+            r = p.add_run(line)
+            set_run_font(r, size=11)
+
+    if letter.subject:
+        p = doc.add_paragraph()
+        p.alignment = WD_ALIGN_PARAGRAPH.LEFT
+        r1 = p.add_run("Asunto: ")
+        set_run_font(r1, size=11, bold=True)
+        r2 = p.add_run(letter.subject)
+        set_run_font(r2, size=11)
+
+    if letter.greeting:
+        p = doc.add_paragraph()
+        p.alignment = WD_ALIGN_PARAGRAPH.LEFT
+        r = p.add_run(letter.greeting)
+        set_run_font(r, size=11)
+
+    for paragraph in letter.body:
+        p = doc.add_paragraph()
+        p.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
+        p.paragraph_format.line_spacing = 1.15
+        p.paragraph_format.space_after = Pt(4)
+        p.paragraph_format.first_line_indent = Inches(0.22)
+        parts = paragraph.split("**")
+        for i, part in enumerate(parts):
+            run = p.add_run(part)
+            set_run_font(run, size=11, bold=(i % 2 == 1))
+
+    if letter.closing:
+        p = doc.add_paragraph()
+        p.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
+        p.paragraph_format.line_spacing = 1.15
+        p.paragraph_format.space_after = Pt(4)
+        p.paragraph_format.first_line_indent = Inches(0.22)
+        r = p.add_run(letter.closing)
+        set_run_font(r, size=11)
+
+    if letter.signature_name:
+        p = doc.add_paragraph()
+        p.paragraph_format.space_before = Pt(16)
+        r = p.add_run(letter.signature_name)
+        set_run_font(r, size=11, bold=True)
+
+    if letter.signature_title:
+        p = doc.add_paragraph()
+        r = p.add_run(letter.signature_title)
+        set_run_font(r, size=11)
+
+    if letter.annexes:
+        p = doc.add_paragraph()
+        r = p.add_run("Anexos:")
+        set_run_font(r, size=11, bold=True)
+
+        for annex in letter.annexes:
+            p = doc.add_paragraph()
+            p.paragraph_format.left_indent = Inches(0.25)
+            p.paragraph_format.first_line_indent = Inches(-0.16)
+            b = p.add_run("• ")
+            set_run_font(b, size=10.5, bold=True)
+            r = p.add_run(annex)
             set_run_font(r, size=10.5)
 
     output = BytesIO()
