@@ -20,7 +20,7 @@ from docx.text.paragraph import Paragraph
 
 app = FastAPI(
     title="GPT DOC Backend",
-    version="0.9.1 template-based robust tables",
+    version="0.9.2 template-based robust tables + clean toc",
     description="Generador de documentos DOCX profesionales basado en plantilla."
 )
 
@@ -92,6 +92,12 @@ def safe_text(value: Any) -> str:
     return str(value)
 
 
+def clean_heading_for_index(text: str) -> str:
+    text = safe_text(text).strip()
+    text = re.sub(r"^\s*\d+(?:\.\d+)*\.?\s*", "", text)
+    return text.strip()
+
+
 def sanitize_filename(filename: str) -> str:
     filename = filename.strip() or "documento.docx"
     filename = re.sub(r'[\\/*?:"<>|]+', "_", filename)
@@ -157,13 +163,11 @@ def replace_placeholder_in_paragraph(paragraph: Paragraph, placeholder: str, val
     if placeholder not in paragraph.text:
         return
 
-    # Intento 1: si el placeholder está completo en un solo run
     for run in paragraph.runs:
         if placeholder in run.text:
             run.text = run.text.replace(placeholder, value)
             return
 
-    # Intento 2: fallback robusto aunque se pierda formato fino de ese párrafo
     paragraph.text = paragraph.text.replace(placeholder, value)
 
 
@@ -205,7 +209,7 @@ def replace_placeholder_with_lines(document: Document, placeholder: str, lines: 
         target.text.replace(placeholder, first_line),
         size=11,
         alignment=WD_ALIGN_PARAGRAPH.LEFT,
-        space_after=3
+        space_after=2
     )
 
     anchor = target
@@ -215,7 +219,7 @@ def replace_placeholder_with_lines(document: Document, placeholder: str, lines: 
             anchor,
             size=11,
             alignment=WD_ALIGN_PARAGRAPH.LEFT,
-            space_after=3,
+            space_after=2,
             line_spacing=1.0
         )
 
@@ -331,12 +335,10 @@ def insert_table_after(
     table.alignment = WD_TABLE_ALIGNMENT.CENTER
     table.autofit = True
 
-    # Estilo opcional, pero sin depender de él.
     table_style = get_existing_table_style(document)
     if table_style:
         table.style = table_style
 
-    # Encabezado
     header_cells = table.rows[0].cells
     for idx, header in enumerate(headers):
         set_cell_text(
@@ -348,7 +350,6 @@ def insert_table_after(
             shaded=True
         )
 
-    # Filas
     for row in rows:
         row_cells = table.add_row().cells
         for idx, value in enumerate(row):
@@ -359,11 +360,9 @@ def insert_table_after(
                 alignment=WD_ALIGN_PARAGRAPH.LEFT
             )
 
-    # Mover la tabla justo después del párrafo ancla
     tbl = table._tbl
     anchor_paragraph._p.addnext(tbl)
 
-    # Crear párrafo vacío después de la tabla para seguir insertando contenido
     new_p = OxmlElement("w:p")
     tbl.addnext(new_p)
     new_anchor = Paragraph(new_p, anchor_paragraph._parent)
@@ -393,7 +392,8 @@ def build_toc_lines(payload: GenerateDocumentRequest) -> List[str]:
         current += 1
 
     for section in payload.sections:
-        lines.append(f"{current}. {section.heading}")
+        clean_heading = clean_heading_for_index(section.heading)
+        lines.append(f"{current}. {clean_heading}")
         current += 1
 
     return lines or ["1. Contenido principal"]
@@ -428,7 +428,6 @@ def build_figure_index_lines(payload: GenerateDocumentRequest) -> List[str]:
 # =========================
 
 def heading_font_size(heading: str) -> int:
-    # Más pequeño si parece subtítulo numerado tipo 1.1 o 2.3.1
     token = heading.strip().split(" ")[0]
     dot_count = token.count(".")
     if dot_count >= 2:
@@ -576,7 +575,9 @@ def render_letter_body(document: Document, anchor: Paragraph, payload: GenerateD
             space_after=12
         )
 
-    body_paragraphs = payload.body_paragraphs or ["Se deja constancia del contenido principal de la presente comunicación."]
+    body_paragraphs = payload.body_paragraphs or [
+        "Se deja constancia del contenido principal de la presente comunicación."
+    ]
 
     for paragraph_text in body_paragraphs:
         anchor = add_paragraph_after(anchor, paragraph_text)
@@ -637,7 +638,6 @@ def build_document(payload: GenerateDocumentRequest) -> io.BytesIO:
     table_index_lines = build_table_index_lines(payload)
     figure_index_lines = build_figure_index_lines(payload)
 
-    # Reemplazo de placeholders simples
     simple_mapping = {
         "{{INSTITUTION}}": safe_text(payload.institution),
         "{{FACULTY}}": safe_text(payload.faculty),
@@ -651,12 +651,10 @@ def build_document(payload: GenerateDocumentRequest) -> io.BytesIO:
     }
     replace_placeholder_everywhere(document, simple_mapping)
 
-    # Reemplazo de índices
     replace_placeholder_with_lines(document, "{{TOC}}", toc_lines)
     replace_placeholder_with_lines(document, "{{TABLE_INDEX}}", table_index_lines)
     replace_placeholder_with_lines(document, "{{FIGURE_INDEX}}", figure_index_lines)
 
-    # Ubicar el punto de inserción del cuerpo
     body_anchor = find_paragraph_with_placeholder(document, "{{BODY_CONTENT}}")
     if body_anchor:
         replace_placeholder_in_paragraph(body_anchor, "{{BODY_CONTENT}}", "")
@@ -667,7 +665,6 @@ def build_document(payload: GenerateDocumentRequest) -> io.BytesIO:
             document.add_paragraph("")
             body_anchor = document.paragraphs[-1]
 
-    # Render del cuerpo según tipo
     if payload.document_type == "carta":
         render_letter_body(document, body_anchor, payload)
     else:
@@ -687,7 +684,7 @@ def build_document(payload: GenerateDocumentRequest) -> io.BytesIO:
 def root():
     return {
         "message": "GPT DOC Backend activo",
-        "version": "0.9.1 template-based robust tables",
+        "version": "0.9.2 template-based robust tables + clean toc",
         "template_path": str(TEMPLATE_PATH),
         "template_exists": TEMPLATE_PATH.exists(),
         "allowed_document_types": ["carta", "informe"],
@@ -724,5 +721,5 @@ def generate_document(payload: GenerateDocumentRequest):
     except Exception as e:
         raise HTTPException(
             status_code=500,
-            detail=f'No se pudo generar el documento. Detalle técnico: {str(e)}'
+            detail=f"No se pudo generar el documento. Detalle técnico: {str(e)}"
         )
