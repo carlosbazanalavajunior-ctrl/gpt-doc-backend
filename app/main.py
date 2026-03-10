@@ -7,7 +7,6 @@ from tempfile import NamedTemporaryFile
 from io import BytesIO
 import base64
 import binascii
-import os
 import re
 import requests
 
@@ -18,7 +17,7 @@ from docx.oxml import OxmlElement
 from docx.text.paragraph import Paragraph
 
 
-app = FastAPI(title="GPT DOC Backend", version="1.0.2 image-fix")
+app = FastAPI(title="GPT DOC Backend", version="1.0.3 anchor-fix")
 
 
 # =========================
@@ -201,7 +200,6 @@ def get_image_stream_from_base64(data: str) -> BytesIO:
     if not data:
         raise ValueError("image_base64 está vacío.")
 
-    # Soporta data URI: data:image/png;base64,.....
     if "," in data and "base64" in data.split(",", 1)[0].lower():
         data = data.split(",", 1)[1]
 
@@ -229,8 +227,11 @@ def get_image_stream_from_url(url: str) -> BytesIO:
         raise ValueError("image_url está vacío.")
 
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                      "(KHTML, like Gecko) Chrome/122.0 Safari/537.36"
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/122.0 Safari/537.36"
+        )
     }
 
     response = requests.get(url, headers=headers, timeout=30, allow_redirects=True)
@@ -395,7 +396,6 @@ def render_letter_body(document: Document, anchor_paragraph, payload: GenerateDo
     for line in normalize_lines(payload.body_content):
         current = add_normal_paragraph_after(current, line)
 
-    # Si por alguna razón mandan sections en carta, también las renderiza
     for section in payload.sections:
         heading = section.heading or section.title or ""
         if heading:
@@ -419,11 +419,18 @@ def render_letter_body(document: Document, anchor_paragraph, payload: GenerateDo
 # ENDPOINT
 # =========================
 
+@app.get("/")
+def root():
+    return {"message": "GPT DOC Backend operativo"}
+
+
 @app.post("/generate-document")
 def generate_document(payload: GenerateDocumentRequest):
     try:
         template_path = choose_template(payload.document_type)
         document = Document(str(template_path))
+
+        body_anchor = find_paragraph_with_placeholder(document, "{{BODY_CONTENT}}")
 
         common_replacements = {
             "{{YEAR_MOTTO}}": payload.year_motto or "",
@@ -438,13 +445,11 @@ def generate_document(payload: GenerateDocumentRequest):
             replacements = {
                 **common_replacements,
                 "{{ADDRESSEE}}": payload.addressee or "",
-                "{{BODY_CONTENT}}": "",
             }
             replace_placeholders_in_document(document, replacements)
 
-            anchor = find_paragraph_with_placeholder(document, "{{BODY_CONTENT}}")
-            if anchor:
-                render_report_body(document, anchor, payload)
+            if body_anchor:
+                render_report_body(document, body_anchor, payload)
 
         elif payload.document_type.lower() == "carta":
             replacements = {
@@ -453,13 +458,11 @@ def generate_document(payload: GenerateDocumentRequest):
                 "{{RECIPIENT_POSITION}}": payload.recipient_position or "",
                 "{{RECIPIENT_INSTITUTION}}": payload.recipient_institution or "",
                 "{{CC_BLOCK}}": join_lines(payload.cc_block),
-                "{{BODY_CONTENT}}": "",
             }
             replace_placeholders_in_document(document, replacements)
 
-            anchor = find_paragraph_with_placeholder(document, "{{BODY_CONTENT}}")
-            if anchor:
-                render_letter_body(document, anchor, payload)
+            if body_anchor:
+                render_letter_body(document, body_anchor, payload)
 
         clean_empty_paragraphs(document)
 
