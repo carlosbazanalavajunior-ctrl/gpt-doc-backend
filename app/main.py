@@ -15,7 +15,7 @@ import requests
 
 app = FastAPI(
     title="GPT Doc Backend",
-    version="0.7.0",
+    version="0.8.0",
     description="Backend para generación de cartas e informes profesionales en formato Word (.docx)."
 )
 
@@ -102,7 +102,7 @@ class GenerateDocumentRequest(BaseModel):
 
 
 # =========================
-# HELPERS XML / DOCX
+# HELPERS BASE
 # =========================
 
 def set_run_font(run, name="Times New Roman", size=11, bold=False, italic=False, color=None):
@@ -139,6 +139,11 @@ def normalize_image_stream(stream: BytesIO, max_width=2200) -> BytesIO:
     img.save(out, format="PNG", optimize=True)
     out.seek(0)
     return out
+
+
+def safe_fetch_image(url: str, max_width=2200) -> BytesIO:
+    stream = fetch_binary(url)
+    return normalize_image_stream(stream, max_width=max_width)
 
 
 def set_cell_border(cell, **kwargs):
@@ -189,50 +194,7 @@ def add_page_number(paragraph):
     run._r.append(fld_char2)
 
 
-def add_field(paragraph, instruction: str):
-    run = paragraph.add_run()
-    fld_char_begin = OxmlElement("w:fldChar")
-    fld_char_begin.set(qn("w:fldCharType"), "begin")
-
-    instr_text = OxmlElement("w:instrText")
-    instr_text.set(qn("xml:space"), "preserve")
-    instr_text.text = instruction
-
-    fld_char_separate = OxmlElement("w:fldChar")
-    fld_char_separate.set(qn("w:fldCharType"), "separate")
-
-    placeholder = OxmlElement("w:t")
-    placeholder.text = "Actualice este campo en Word"
-
-    fld_char_end = OxmlElement("w:fldChar")
-    fld_char_end.set(qn("w:fldCharType"), "end")
-
-    run._r.append(fld_char_begin)
-    run._r.append(instr_text)
-    run._r.append(fld_char_separate)
-    run._r.append(placeholder)
-    run._r.append(fld_char_end)
-
-
-def add_seq_field_run(paragraph, seq_name: str):
-    run = paragraph.add_run()
-    fld_char_begin = OxmlElement("w:fldChar")
-    fld_char_begin.set(qn("w:fldCharType"), "begin")
-
-    instr_text = OxmlElement("w:instrText")
-    instr_text.set(qn("xml:space"), "preserve")
-    instr_text.text = f" SEQ {seq_name} \\* ARABIC "
-
-    fld_char_end = OxmlElement("w:fldChar")
-    fld_char_end.set(qn("w:fldCharType"), "end")
-
-    run._r.append(fld_char_begin)
-    run._r.append(instr_text)
-    run._r.append(fld_char_end)
-    return run
-
-
-def add_horizontal_rule(paragraph, color="C8C8C8", size="6"):
+def add_horizontal_rule(paragraph, color="C8C8C8", size="5"):
     p = paragraph._p
     pPr = p.get_or_add_pPr()
     pbdr = pPr.find(qn("w:pBdr"))
@@ -267,7 +229,7 @@ def configure_document(doc: Document):
     normal._element.rPr.rFonts.set(qn("w:eastAsia"), "Times New Roman")
     normal.font.size = Pt(11)
     normal.paragraph_format.line_spacing = 1.15
-    normal.paragraph_format.space_after = Pt(5)
+    normal.paragraph_format.space_after = Pt(4)
     normal.paragraph_format.space_before = Pt(0)
     normal.paragraph_format.first_line_indent = Inches(0.22)
 
@@ -291,12 +253,11 @@ def configure_document(doc: Document):
         style.paragraph_format.first_line_indent = Inches(0)
 
 
-def add_logo(doc: Document, logo_url: Optional[str], width=0.9):
+def add_logo(doc: Document, logo_url: Optional[str], width=0.85):
     if not logo_url:
         return
     try:
-        stream = fetch_binary(logo_url)
-        stream = normalize_image_stream(stream)
+        stream = safe_fetch_image(logo_url)
         doc.add_picture(stream, width=Inches(width))
         doc.paragraphs[-1].alignment = WD_ALIGN_PARAGRAPH.CENTER
     except Exception:
@@ -388,7 +349,7 @@ def add_header_footer(section, header_text: Optional[str], footer_text: Optional
 # =========================
 
 def add_report_cover(doc: Document, report: dict):
-    add_logo(doc, report.get("logo_url"), width=0.85)
+    add_logo(doc, report.get("logo_url"), width=0.82)
 
     institution = (report.get("institution") or "").strip()
     faculty = (report.get("faculty") or "").strip()
@@ -419,18 +380,18 @@ def add_report_cover(doc: Document, report: dict):
     if department:
         p = doc.add_paragraph()
         p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        p.paragraph_format.space_after = Pt(6)
+        p.paragraph_format.space_after = Pt(5)
         r = p.add_run(department)
         set_run_font(r, size=9.5, color="555555")
 
     sep = doc.add_paragraph()
     sep.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    sep.paragraph_format.space_after = Pt(5)
+    sep.paragraph_format.space_after = Pt(4)
     add_horizontal_rule(sep, color="C6C6C6", size="5")
 
     p = doc.add_paragraph()
     p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    p.paragraph_format.space_after = Pt(5)
+    p.paragraph_format.space_after = Pt(4)
     r = p.add_run(report_kind.upper())
     set_run_font(r, size=11, bold=True, color="404040")
 
@@ -444,7 +405,7 @@ def add_report_cover(doc: Document, report: dict):
     if subtitle:
         p = doc.add_paragraph()
         p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        p.paragraph_format.space_after = Pt(8)
+        p.paragraph_format.space_after = Pt(7)
         r = p.add_run(subtitle)
         set_run_font(r, size=10, italic=True, color="555555")
 
@@ -469,7 +430,7 @@ def add_report_cover(doc: Document, report: dict):
     if city or date:
         p = doc.add_paragraph()
         p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        p.paragraph_format.space_before = Pt(5)
+        p.paragraph_format.space_before = Pt(4)
         text = f"{city}, {date}" if city and date else city or date
         r = p.add_run(text)
         set_run_font(r, size=9.5, color="555555")
@@ -477,42 +438,44 @@ def add_report_cover(doc: Document, report: dict):
     doc.add_page_break()
 
 
-def add_toc_page(doc: Document, title: str, instruction: str):
+def add_generated_index_page(doc: Document, title: str, entries: List[str]):
     doc.add_heading(title, level=1)
-    p = doc.add_paragraph()
-    p.alignment = WD_ALIGN_PARAGRAPH.LEFT
-    p.paragraph_format.first_line_indent = Inches(0)
-    add_field(p, instruction)
 
-    note = doc.add_paragraph()
-    note.alignment = WD_ALIGN_PARAGRAPH.LEFT
-    note.paragraph_format.first_line_indent = Inches(0)
-    r = note.add_run("Nota: en Word, use clic derecho sobre el índice y elija 'Actualizar campo'.")
-    set_run_font(r, size=9, italic=True, color="666666")
+    if not entries:
+        p = doc.add_paragraph()
+        p.alignment = WD_ALIGN_PARAGRAPH.LEFT
+        p.paragraph_format.first_line_indent = Inches(0)
+        r = p.add_run("No se registraron elementos en esta sección.")
+        set_run_font(r, size=10, italic=True, color="666666")
+    else:
+        for entry in entries:
+            p = doc.add_paragraph()
+            p.alignment = WD_ALIGN_PARAGRAPH.LEFT
+            p.paragraph_format.space_before = Pt(0)
+            p.paragraph_format.space_after = Pt(2)
+            p.paragraph_format.first_line_indent = Inches(0)
+            r = p.add_run(entry)
+            set_run_font(r, size=10.2)
+
     doc.add_page_break()
 
 
 # =========================
-# CAPTIONS PROFESIONALES
+# CAPTIONS Y REGISTRO
 # =========================
 
-def add_caption(doc: Document, label: str, caption_text: str):
+def add_caption(doc: Document, label: str, number: int, caption_text: str):
     p = doc.add_paragraph()
     p.alignment = WD_ALIGN_PARAGRAPH.CENTER
     p.paragraph_format.space_before = Pt(3)
     p.paragraph_format.space_after = Pt(6)
     p.paragraph_format.first_line_indent = Inches(0)
 
-    r1 = p.add_run(f"{label} ")
+    r1 = p.add_run(f"{label} {number}. ")
     set_run_font(r1, size=9.5, bold=True)
 
-    add_seq_field_run(p, label)
-
-    r2 = p.add_run(". ")
-    set_run_font(r2, size=9.5, bold=True)
-
-    r3 = p.add_run(caption_text)
-    set_run_font(r3, size=9.5, italic=True, color="555555")
+    r2 = p.add_run(caption_text)
+    set_run_font(r2, size=9.5, italic=True, color="555555")
 
     return p
 
@@ -521,14 +484,14 @@ def add_caption(doc: Document, label: str, caption_text: str):
 # TABLAS / FIGURAS / GRÁFICOS
 # =========================
 
-def add_apa_table(doc: Document, table_data: dict):
+def add_apa_table(doc: Document, table_data: dict, table_number: int):
     title = (table_data.get("title") or "").strip()
     headers = table_data.get("headers", [])
     rows = table_data.get("rows", [])
     note = (table_data.get("note") or "").strip()
 
     if title:
-        add_caption(doc, "Tabla", title)
+        add_caption(doc, "Tabla", table_number, title)
 
     ncols = len(headers) if headers else (len(rows[0]) if rows else 0)
     if ncols == 0:
@@ -602,7 +565,7 @@ def add_apa_table(doc: Document, table_data: dict):
         set_run_font(r, size=9, italic=True, color="555555")
 
 
-def add_figure_from_url(doc: Document, figure: dict):
+def add_figure_from_url(doc: Document, figure: dict, figure_number: int):
     try:
         title = figure.get("title")
         caption = figure.get("caption")
@@ -617,23 +580,24 @@ def add_figure_from_url(doc: Document, figure: dict):
             r = p.add_run(title)
             set_run_font(r, size=10.5, bold=True)
 
-        image_stream = fetch_binary(figure["url"])
-        image_stream = normalize_image_stream(image_stream)
+        image_stream = safe_fetch_image(figure["url"], max_width=2600)
         doc.add_picture(image_stream, width=Inches(width_inches))
         doc.paragraphs[-1].alignment = WD_ALIGN_PARAGRAPH.CENTER
 
         if caption:
-            add_caption(doc, "Figura", caption)
+            add_caption(doc, "Figura", figure_number, caption)
 
-    except Exception as e:
+    except Exception:
         p = doc.add_paragraph()
-        p.alignment = WD_ALIGN_PARAGRAPH.LEFT
+        p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        p.paragraph_format.space_before = Pt(3)
+        p.paragraph_format.space_after = Pt(6)
         p.paragraph_format.first_line_indent = Inches(0)
-        r = p.add_run(f"[No se pudo insertar la figura desde URL: {str(e)}]")
-        set_run_font(r, size=9, italic=True, color="AA0000")
+        r = p.add_run("[Imagen no disponible en esta prueba]")
+        set_run_font(r, size=9.5, italic=True, color="777777")
 
 
-def add_quickchart(doc: Document, chart: dict):
+def add_quickchart(doc: Document, chart: dict, figure_number: int):
     try:
         title = chart.get("title")
         caption = chart.get("caption")
@@ -671,14 +635,16 @@ def add_quickchart(doc: Document, chart: dict):
         doc.paragraphs[-1].alignment = WD_ALIGN_PARAGRAPH.CENTER
 
         if caption:
-            add_caption(doc, "Figura", caption)
+            add_caption(doc, "Figura", figure_number, caption)
 
-    except Exception as e:
+    except Exception:
         p = doc.add_paragraph()
-        p.alignment = WD_ALIGN_PARAGRAPH.LEFT
+        p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        p.paragraph_format.space_before = Pt(3)
+        p.paragraph_format.space_after = Pt(6)
         p.paragraph_format.first_line_indent = Inches(0)
-        r = p.add_run(f"[No se pudo insertar el gráfico: {str(e)}]")
-        set_run_font(r, size=9, italic=True, color="AA0000")
+        r = p.add_run("[Gráfico no disponible en esta prueba]")
+        set_run_font(r, size=9.5, italic=True, color="777777")
 
 
 # =========================
@@ -689,7 +655,7 @@ def build_letter_doc(letter: LetterPayload) -> BytesIO:
     doc = Document()
     configure_document(doc)
 
-    add_logo(doc, letter.logo_url, width=0.85)
+    add_logo(doc, letter.logo_url, width=0.82)
 
     if letter.organization:
         p = doc.add_paragraph()
@@ -779,16 +745,61 @@ def build_report_doc(report: ReportPayload) -> BytesIO:
     doc = Document()
     configure_document(doc)
 
+    # Recolectar índices previos de backend
+    toc_entries: List[str] = []
+    table_index_entries: List[str] = []
+    figure_index_entries: List[str] = []
+
+    if report.executive_summary:
+        toc_entries.append("Resumen Ejecutivo")
+
+    figure_counter = 0
+    table_counter = 0
+
+    if report.sections:
+        for section_item in report.sections:
+            indent = "    " * max(0, section_item.level - 1)
+            toc_entries.append(f"{indent}{section_item.heading}")
+
+            if section_item.tables:
+                for table in section_item.tables:
+                    table_counter += 1
+                    table_title = (table.title or f"Tabla sin título {table_counter}").strip()
+                    table_index_entries.append(f"Tabla {table_counter}. {table_title}")
+
+            if section_item.figures:
+                for fig in section_item.figures:
+                    figure_counter += 1
+                    caption = (fig.caption or fig.title or f"Figura sin título {figure_counter}").strip()
+                    figure_index_entries.append(f"Figura {figure_counter}. {caption}")
+
+            if section_item.charts:
+                for chart in section_item.charts:
+                    figure_counter += 1
+                    caption = (chart.caption or chart.title or f"Gráfico sin título {figure_counter}").strip()
+                    figure_index_entries.append(f"Figura {figure_counter}. {caption}")
+
+    if report.conclusions:
+        toc_entries.append("Conclusiones")
+    if report.recommendations:
+        toc_entries.append("Recomendaciones")
+    if report.references:
+        toc_entries.append("Referencias")
+
     # Portada
     add_report_cover(doc, report.model_dump())
 
-    # Preliminares automáticos
-    add_toc_page(doc, "Índice general", 'TOC \\o "1-3" \\h \\z \\u')
-    add_toc_page(doc, "Índice de tablas", 'TOC \\h \\z \\c "Tabla"')
-    add_toc_page(doc, "Índice de figuras", 'TOC \\h \\z \\c "Figura"')
+    # Índices generados por backend
+    add_generated_index_page(doc, "Índice general", toc_entries)
+    add_generated_index_page(doc, "Índice de tablas", table_index_entries)
+    add_generated_index_page(doc, "Índice de figuras", figure_index_entries)
 
     section = doc.sections[-1]
     add_header_footer(section, report.header_text, report.footer_text)
+
+    # Reset contadores para render final
+    figure_counter = 0
+    table_counter = 0
 
     if report.executive_summary:
         doc.add_heading("Resumen Ejecutivo", level=1)
@@ -811,15 +822,18 @@ def build_report_doc(report: ReportPayload) -> BytesIO:
 
             if section_item.tables:
                 for table in section_item.tables:
-                    add_apa_table(doc, table.model_dump())
+                    table_counter += 1
+                    add_apa_table(doc, table.model_dump(), table_counter)
 
             if section_item.figures:
                 for fig in section_item.figures:
-                    add_figure_from_url(doc, fig.model_dump())
+                    figure_counter += 1
+                    add_figure_from_url(doc, fig.model_dump(), figure_counter)
 
             if section_item.charts:
                 for chart in section_item.charts:
-                    add_quickchart(doc, chart.model_dump())
+                    figure_counter += 1
+                    add_quickchart(doc, chart.model_dump(), figure_counter)
 
     if report.conclusions:
         doc.add_heading("Conclusiones", level=1)
@@ -890,7 +904,7 @@ def generate_document(payload: GenerateDocumentRequest):
         return StreamingResponse(
             file_stream,
             media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-            headers={"Content-Disposition": f'attachment; filename="{filename}"'}
+            headers={"Content-Disposition": f'attachment; filename=\"{filename}\"'}
         )
 
     except HTTPException:
