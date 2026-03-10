@@ -17,7 +17,7 @@ from docx.oxml import OxmlElement
 from docx.text.paragraph import Paragraph
 
 
-app = FastAPI(title="GPT DOC Backend", version="1.0.3 anchor-fix")
+app = FastAPI(title="GPT DOC Backend", version="1.0.4 graceful-image-fallback")
 
 
 # =========================
@@ -231,25 +231,37 @@ def get_image_stream_from_url(url: str) -> BytesIO:
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
             "AppleWebKit/537.36 (KHTML, like Gecko) "
             "Chrome/122.0 Safari/537.36"
-        )
+        ),
+        "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+        "Referer": url,
     }
 
-    response = requests.get(url, headers=headers, timeout=30, allow_redirects=True)
+    response = requests.get(
+        url,
+        headers=headers,
+        timeout=30,
+        allow_redirects=True,
+        stream=True
+    )
     response.raise_for_status()
 
-    if not response.content:
+    content = response.content
+    if not content:
         raise ValueError("La URL no devolvió contenido.")
 
-    stream = BytesIO(response.content)
+    stream = BytesIO(content)
     stream.seek(0)
     return stream
 
 
 def get_figure_image_stream(fig: FigureBlock) -> BytesIO:
+    # Prioridad total al base64 porque es el método más estable
     if fig.image_base64:
         return get_image_stream_from_base64(fig.image_base64)
+
     if fig.image_url:
         return get_image_stream_from_url(fig.image_url)
+
     raise ValueError("La figura no tiene ni image_url ni image_base64.")
 
 
@@ -344,15 +356,25 @@ def render_figure(document: Document, current_paragraph, fig: FigureBlock):
             align=alignment_from_text(fig.alignment)
         )
 
-    image_stream = get_figure_image_stream(fig)
+    try:
+        image_stream = get_figure_image_stream(fig)
 
-    current_paragraph = add_image_after(
-        document=document,
-        paragraph=current_paragraph,
-        image_stream=image_stream,
-        width_inches=float(fig.width_inches or 5.8),
-        alignment=fig.alignment or "center"
-    )
+        current_paragraph = add_image_after(
+            document=document,
+            paragraph=current_paragraph,
+            image_stream=image_stream,
+            width_inches=float(fig.width_inches or 5.8),
+            alignment=fig.alignment or "center"
+        )
+
+    except Exception as e:
+        warning = f"[No se pudo insertar la imagen: {type(e).__name__}: {str(e)}]"
+        current_paragraph = add_normal_paragraph_after(
+            current_paragraph,
+            warning,
+            align=alignment_from_text(fig.alignment),
+            italic=True
+        )
 
     if fig.caption:
         current_paragraph = add_normal_paragraph_after(
