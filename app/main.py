@@ -12,7 +12,6 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from docx import Document
-from docx.enum.section import WD_SECTION_START
 from docx.enum.table import WD_TABLE_ALIGNMENT
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml import OxmlElement
@@ -23,7 +22,7 @@ from docx.text.paragraph import Paragraph
 
 app = FastAPI(
     title="GPT DOC Backend",
-    version="1.0.0 professional templates + image support",
+    version="1.0.1 professional templates + image support",
     description="Generador DOCX profesional para cartas e informes con soporte de tablas e imágenes."
 )
 
@@ -245,7 +244,7 @@ def add_paragraph_after(paragraph: Paragraph, text: str = "") -> Paragraph:
 
 def replace_placeholder_with_lines(document: Document, placeholder: str, lines: List[str]):
     target = find_paragraph_with_placeholder(document, placeholder)
-    lines = lines or ["Sin elementos registrados."]
+    lines = lines or [""]
 
     if not target:
         replace_placeholder_everywhere(document, {placeholder: "\n".join(lines)})
@@ -274,7 +273,7 @@ def replace_placeholder_with_lines(document: Document, placeholder: str, lines: 
 
 def build_reference_lines(references: List[ReferenceItem]) -> List[str]:
     if not references:
-        return ["Sin referencia."]
+        return [""]
     lines = []
     for idx, ref in enumerate(references, start=1):
         if ref.label:
@@ -462,10 +461,7 @@ def map_alignment(alignment: str):
     return WD_ALIGN_PARAGRAPH.CENTER
 
 
-def insert_figure_after(
-    anchor: Paragraph,
-    figure: FigureBlock
-) -> Paragraph:
+def insert_figure_after(anchor: Paragraph, figure: FigureBlock) -> Paragraph:
     image_bytes = get_figure_image_bytes(figure)
 
     if not image_bytes:
@@ -552,37 +548,50 @@ def heading_font_size(heading: str) -> int:
 def render_letter_body(document: Document, anchor: Paragraph, payload: GenerateDocumentRequest):
     if payload.greeting:
         anchor = add_paragraph_after(anchor, payload.greeting)
-        format_paragraph(anchor, size=11, alignment=WD_ALIGN_PARAGRAPH.LEFT, space_after=8)
+        format_paragraph(
+            anchor,
+            size=11,
+            alignment=WD_ALIGN_PARAGRAPH.LEFT,
+            space_after=8
+        )
 
     for paragraph_text in payload.body_paragraphs:
         anchor = add_paragraph_after(anchor, paragraph_text)
-        format_paragraph(anchor, size=11, alignment=WD_ALIGN_PARAGRAPH.JUSTIFY, space_after=8)
+        format_paragraph(
+            anchor,
+            size=11,
+            alignment=WD_ALIGN_PARAGRAPH.JUSTIFY,
+            space_after=8
+        )
 
     if payload.closing:
         anchor = add_paragraph_after(anchor, "")
         anchor = add_paragraph_after(anchor, payload.closing)
-        format_paragraph(anchor, size=11, alignment=WD_ALIGN_PARAGRAPH.LEFT, space_after=18)
+        format_paragraph(
+            anchor,
+            size=11,
+            alignment=WD_ALIGN_PARAGRAPH.LEFT,
+            space_after=18
+        )
 
     if payload.signature_name:
         anchor = add_paragraph_after(anchor, payload.signature_name)
-        format_paragraph(anchor, size=11, bold=True, alignment=WD_ALIGN_PARAGRAPH.LEFT, space_after=1)
+        format_paragraph(
+            anchor,
+            size=11,
+            bold=True,
+            alignment=WD_ALIGN_PARAGRAPH.LEFT,
+            space_after=1
+        )
 
     if payload.signature_position:
         anchor = add_paragraph_after(anchor, payload.signature_position)
-        format_paragraph(anchor, size=11, alignment=WD_ALIGN_PARAGRAPH.LEFT, space_after=1)
-
-    if payload.cc_lines:
-        anchor = add_paragraph_after(anchor, "")
-        for idx, line in enumerate(payload.cc_lines):
-            text = line if idx > 0 else f"C.c.: {line}"
-            anchor = add_paragraph_after(anchor, text)
-            format_paragraph(anchor, size=10, alignment=WD_ALIGN_PARAGRAPH.LEFT, space_after=1)
-
-    if payload.footer_lines:
-        anchor = add_paragraph_after(anchor, "")
-        for line in payload.footer_lines:
-            anchor = add_paragraph_after(anchor, line)
-            format_paragraph(anchor, size=9, alignment=WD_ALIGN_PARAGRAPH.CENTER, space_after=1)
+        format_paragraph(
+            anchor,
+            size=11,
+            alignment=WD_ALIGN_PARAGRAPH.LEFT,
+            space_after=1
+        )
 
 
 def render_report_body(document: Document, anchor: Paragraph, payload: GenerateDocumentRequest):
@@ -819,7 +828,6 @@ def build_document(payload: GenerateDocumentRequest) -> io.BytesIO:
             document.add_paragraph("")
             body_anchor = document.paragraphs[-1]
 
-    # Si está usando la plantilla genérica, arma encabezados de manera programática
     if is_generic_template(template_path):
         if payload.document_type == "carta":
             body_anchor = create_letter_header_fallback(document, body_anchor, payload)
@@ -847,7 +855,7 @@ def build_document(payload: GenerateDocumentRequest) -> io.BytesIO:
 def root():
     return {
         "message": "GPT DOC Backend activo",
-        "version": "1.0.0 professional templates + image support",
+        "version": "1.0.1 professional templates + image support",
         "generic_template_exists": GENERIC_TEMPLATE.exists(),
         "letter_template_exists": any(p.exists() for p in LETTER_TEMPLATE_CANDIDATES if p != GENERIC_TEMPLATE),
         "report_template_exists": any(p.exists() for p in REPORT_TEMPLATE_CANDIDATES if p != GENERIC_TEMPLATE),
