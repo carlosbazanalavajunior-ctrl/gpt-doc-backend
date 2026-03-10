@@ -20,7 +20,7 @@ from docx.text.paragraph import Paragraph
 
 app = FastAPI(
     title="GPT DOC Backend",
-    version="0.9.2 template-based robust tables + clean toc",
+    version="0.9.3 template-based robust tables + spacing cleanup",
     description="Generador de documentos DOCX profesionales basado en plantilla."
 )
 
@@ -621,6 +621,68 @@ def render_letter_body(document: Document, anchor: Paragraph, payload: GenerateD
 
 
 # =========================
+# LIMPIEZA DE ESPACIADO
+# =========================
+
+def delete_paragraph(paragraph: Paragraph):
+    p = paragraph._element
+    parent = p.getparent()
+    if parent is not None:
+        parent.remove(p)
+
+
+def paragraph_has_page_break(paragraph: Paragraph) -> bool:
+    xml = paragraph._p.xml
+    return (
+        'w:type="page"' in xml
+        or "<w:br" in xml
+        or "lastRenderedPageBreak" in xml
+        or "pageBreakBefore" in xml
+        or "<w:sectPr" in xml
+    )
+
+
+def is_blank_paragraph(paragraph: Paragraph) -> bool:
+    return not paragraph.text.strip()
+
+
+def collapse_blank_paragraphs_after_marker(
+    document: Document,
+    marker_text: str,
+    max_consecutive_blank: int = 1
+):
+    paragraphs = list(document.paragraphs)
+
+    start_index = None
+    for idx, paragraph in enumerate(paragraphs):
+        if paragraph.text.strip() == marker_text:
+            start_index = idx
+            break
+
+    if start_index is None:
+        return
+
+    blank_run = 0
+    for paragraph in list(document.paragraphs)[start_index + 1:]:
+        if paragraph_has_page_break(paragraph):
+            blank_run = 0
+            continue
+
+        if is_blank_paragraph(paragraph):
+            blank_run += 1
+            if blank_run > max_consecutive_blank:
+                delete_paragraph(paragraph)
+        else:
+            blank_run = 0
+
+
+def cleanup_generated_spacing(document: Document, payload: GenerateDocumentRequest):
+    # Compacta los bloques vacíos a partir del índice general,
+    # sin tocar demasiado la portada.
+    collapse_blank_paragraphs_after_marker(document, "ÍNDICE GENERAL", max_consecutive_blank=1)
+
+
+# =========================
 # GENERACIÓN PRINCIPAL
 # =========================
 
@@ -670,6 +732,8 @@ def build_document(payload: GenerateDocumentRequest) -> io.BytesIO:
     else:
         render_report_body(document, body_anchor, payload)
 
+    cleanup_generated_spacing(document, payload)
+
     output = io.BytesIO()
     document.save(output)
     output.seek(0)
@@ -684,7 +748,7 @@ def build_document(payload: GenerateDocumentRequest) -> io.BytesIO:
 def root():
     return {
         "message": "GPT DOC Backend activo",
-        "version": "0.9.2 template-based robust tables + clean toc",
+        "version": "0.9.3 template-based robust tables + spacing cleanup",
         "template_path": str(TEMPLATE_PATH),
         "template_exists": TEMPLATE_PATH.exists(),
         "allowed_document_types": ["carta", "informe"],
