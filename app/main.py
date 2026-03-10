@@ -1,36 +1,56 @@
 from __future__ import annotations
 
+import base64
 import io
 import re
 from pathlib import Path
 from typing import Any, List, Literal, Optional
 
+import requests
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from docx import Document
+from docx.enum.section import WD_SECTION_START
 from docx.enum.table import WD_TABLE_ALIGNMENT
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
-from docx.shared import Pt
+from docx.shared import Inches, Pt
 from docx.text.paragraph import Paragraph
 
 
 app = FastAPI(
     title="GPT DOC Backend",
-    version="0.9.3 template-based robust tables + spacing cleanup",
-    description="Generador de documentos DOCX profesionales basado en plantilla."
+    version="1.0.0 professional templates + image support",
+    description="Generador DOCX profesional para cartas e informes con soporte de tablas e imágenes."
 )
 
 BASE_DIR = Path(__file__).resolve().parent.parent
-TEMPLATE_PATH = BASE_DIR / "templates" / "professional_report_template.docx"
+TEMPLATES_DIR = BASE_DIR / "templates"
+
+GENERIC_TEMPLATE = TEMPLATES_DIR / "professional_report_template.docx"
+LETTER_TEMPLATE_CANDIDATES = [
+    TEMPLATES_DIR / "carta_profesional.docx",
+    TEMPLATES_DIR / "carta_eps_profesional.docx",
+    GENERIC_TEMPLATE,
+]
+REPORT_TEMPLATE_CANDIDATES = [
+    TEMPLATES_DIR / "informe_profesional.docx",
+    TEMPLATES_DIR / "informe_eps_profesional.docx",
+    GENERIC_TEMPLATE,
+]
 
 
 # =========================
 # MODELOS
 # =========================
+
+class ReferenceItem(BaseModel):
+    label: Optional[str] = None
+    text: str
+
 
 class TableBlock(BaseModel):
     title: str
@@ -42,6 +62,10 @@ class TableBlock(BaseModel):
 class FigureBlock(BaseModel):
     title: str
     caption: Optional[str] = None
+    image_url: Optional[str] = None
+    image_base64: Optional[str] = None
+    width_inches: float = 5.8
+    alignment: Literal["left", "center", "right"] = "center"
 
 
 class SectionBlock(BaseModel):
@@ -57,6 +81,7 @@ class GenerateDocumentRequest(BaseModel):
     document_type: Literal["carta", "informe"]
     filename: Optional[str] = None
 
+    # Comunes
     institution: Optional[str] = ""
     faculty: Optional[str] = ""
     department: Optional[str] = ""
@@ -67,19 +92,30 @@ class GenerateDocumentRequest(BaseModel):
     reviewer: Optional[str] = ""
     city_date: Optional[str] = ""
 
-    intro_paragraphs: List[str] = Field(default_factory=list)
-    sections: List[SectionBlock] = Field(default_factory=list)
-
-    # Campos específicos para carta
-    recipient_name: Optional[str] = ""
-    recipient_position: Optional[str] = ""
-    recipient_institution: Optional[str] = ""
+    # Bloques profesionales
+    year_motto: Optional[str] = ""
+    document_code: Optional[str] = ""
     subject: Optional[str] = ""
-    greeting: Optional[str] = "De mi consideración:"
-    body_paragraphs: List[str] = Field(default_factory=list)
+    opening: Optional[str] = ""
     closing: Optional[str] = "Atentamente,"
     signature_name: Optional[str] = ""
     signature_position: Optional[str] = ""
+    footer_lines: List[str] = Field(default_factory=list)
+    cc_lines: List[str] = Field(default_factory=list)
+    references: List[ReferenceItem] = Field(default_factory=list)
+
+    # Carta
+    recipient_name: Optional[str] = ""
+    recipient_position: Optional[str] = ""
+    recipient_institution: Optional[str] = ""
+    greeting: Optional[str] = "Es grato dirigirme a usted, para manifestarle lo siguiente:"
+    body_paragraphs: List[str] = Field(default_factory=list)
+
+    # Informe
+    report_addressee: Optional[str] = ""
+    opening_paragraph: Optional[str] = ""
+    intro_paragraphs: List[str] = Field(default_factory=list)
+    sections: List[SectionBlock] = Field(default_factory=list)
 
 
 # =========================
@@ -104,6 +140,18 @@ def sanitize_filename(filename: str) -> str:
     if not filename.lower().endswith(".docx"):
         filename += ".docx"
     return filename
+
+
+def choose_template_path(payload: GenerateDocumentRequest) -> Path:
+    candidates = LETTER_TEMPLATE_CANDIDATES if payload.document_type == "carta" else REPORT_TEMPLATE_CANDIDATES
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    raise FileNotFoundError("No se encontró ninguna plantilla DOCX disponible.")
+
+
+def is_generic_template(path: Path) -> bool:
+    return path.name == GENERIC_TEMPLATE.name
 
 
 def set_run_font(run, size=11, bold=False, italic=False):
@@ -224,6 +272,18 @@ def replace_placeholder_with_lines(document: Document, placeholder: str, lines: 
         )
 
 
+def build_reference_lines(references: List[ReferenceItem]) -> List[str]:
+    if not references:
+        return ["Sin referencia."]
+    lines = []
+    for idx, ref in enumerate(references, start=1):
+        if ref.label:
+            lines.append(f"{ref.label}) {ref.text}")
+        else:
+            lines.append(f"{idx}) {ref.text}")
+    return lines
+
+
 def get_existing_table_style(document: Document) -> Optional[str]:
     preferred_candidates = [
         "Table Grid",
@@ -244,7 +304,7 @@ def get_existing_table_style(document: Document) -> Optional[str]:
 
 
 # =========================
-# UTILIDADES DE TABLAS
+# TABLAS
 # =========================
 
 def set_cell_shading(cell, fill: str = "D9EAF7"):
@@ -371,32 +431,84 @@ def insert_table_after(
 
 
 # =========================
+# FIGURAS / IMÁGENES
+# =========================
+
+def decode_base64_image(image_base64: str) -> bytes:
+    if "," in image_base64 and "base64" in image_base64:
+        image_base64 = image_base64.split(",", 1)[1]
+    return base64.b64decode(image_base64)
+
+
+def download_image_bytes(image_url: str) -> bytes:
+    response = requests.get(image_url, timeout=20)
+    response.raise_for_status()
+    return response.content
+
+
+def get_figure_image_bytes(figure: FigureBlock) -> Optional[bytes]:
+    if figure.image_base64:
+        return decode_base64_image(figure.image_base64)
+    if figure.image_url:
+        return download_image_bytes(figure.image_url)
+    return None
+
+
+def map_alignment(alignment: str):
+    if alignment == "left":
+        return WD_ALIGN_PARAGRAPH.LEFT
+    if alignment == "right":
+        return WD_ALIGN_PARAGRAPH.RIGHT
+    return WD_ALIGN_PARAGRAPH.CENTER
+
+
+def insert_figure_after(
+    anchor: Paragraph,
+    figure: FigureBlock
+) -> Paragraph:
+    image_bytes = get_figure_image_bytes(figure)
+
+    if not image_bytes:
+        return anchor
+
+    image_paragraph = add_paragraph_after(anchor, "")
+    image_paragraph.alignment = map_alignment(figure.alignment)
+    run = image_paragraph.add_run()
+    run.add_picture(io.BytesIO(image_bytes), width=Inches(figure.width_inches))
+    format_paragraph(
+        image_paragraph,
+        size=10,
+        alignment=map_alignment(figure.alignment),
+        space_after=4,
+        line_spacing=1.0
+    )
+    return image_paragraph
+
+
+# =========================
 # ÍNDICES
 # =========================
 
 def build_toc_lines(payload: GenerateDocumentRequest) -> List[str]:
     if payload.document_type == "carta":
         return [
-            "1. Encabezado institucional",
-            "2. Datos del destinatario",
-            "3. Asunto",
-            "4. Cuerpo de la carta",
-            "5. Despedida y firma",
+            "Encabezado institucional",
+            "Datos del destinatario",
+            "Asunto",
+            "Cuerpo de la carta",
+            "Despedida y firma",
         ]
 
     lines = []
-    current = 1
 
     if payload.intro_paragraphs:
-        lines.append(f"{current}. Introducción")
-        current += 1
+        lines.append("Introducción")
 
-    for section in payload.sections:
+    for idx, section in enumerate(payload.sections, start=1):
         clean_heading = clean_heading_for_index(section.heading)
-        lines.append(f"{current}. {clean_heading}")
-        current += 1
+        lines.append(f"{idx}. {clean_heading}")
 
-    return lines or ["1. Contenido principal"]
+    return lines or ["Contenido principal"]
 
 
 def build_table_index_lines(payload: GenerateDocumentRequest) -> List[str]:
@@ -424,7 +536,7 @@ def build_figure_index_lines(payload: GenerateDocumentRequest) -> List[str]:
 
 
 # =========================
-# RENDER DEL CUERPO
+# BLOQUES PROFESIONALES
 # =========================
 
 def heading_font_size(heading: str) -> int:
@@ -437,19 +549,53 @@ def heading_font_size(heading: str) -> int:
     return 14
 
 
+def render_letter_body(document: Document, anchor: Paragraph, payload: GenerateDocumentRequest):
+    if payload.greeting:
+        anchor = add_paragraph_after(anchor, payload.greeting)
+        format_paragraph(anchor, size=11, alignment=WD_ALIGN_PARAGRAPH.LEFT, space_after=8)
+
+    for paragraph_text in payload.body_paragraphs:
+        anchor = add_paragraph_after(anchor, paragraph_text)
+        format_paragraph(anchor, size=11, alignment=WD_ALIGN_PARAGRAPH.JUSTIFY, space_after=8)
+
+    if payload.closing:
+        anchor = add_paragraph_after(anchor, "")
+        anchor = add_paragraph_after(anchor, payload.closing)
+        format_paragraph(anchor, size=11, alignment=WD_ALIGN_PARAGRAPH.LEFT, space_after=18)
+
+    if payload.signature_name:
+        anchor = add_paragraph_after(anchor, payload.signature_name)
+        format_paragraph(anchor, size=11, bold=True, alignment=WD_ALIGN_PARAGRAPH.LEFT, space_after=1)
+
+    if payload.signature_position:
+        anchor = add_paragraph_after(anchor, payload.signature_position)
+        format_paragraph(anchor, size=11, alignment=WD_ALIGN_PARAGRAPH.LEFT, space_after=1)
+
+    if payload.cc_lines:
+        anchor = add_paragraph_after(anchor, "")
+        for idx, line in enumerate(payload.cc_lines):
+            text = line if idx > 0 else f"C.c.: {line}"
+            anchor = add_paragraph_after(anchor, text)
+            format_paragraph(anchor, size=10, alignment=WD_ALIGN_PARAGRAPH.LEFT, space_after=1)
+
+    if payload.footer_lines:
+        anchor = add_paragraph_after(anchor, "")
+        for line in payload.footer_lines:
+            anchor = add_paragraph_after(anchor, line)
+            format_paragraph(anchor, size=9, alignment=WD_ALIGN_PARAGRAPH.CENTER, space_after=1)
+
+
 def render_report_body(document: Document, anchor: Paragraph, payload: GenerateDocumentRequest):
     table_counter = 1
     figure_counter = 1
 
+    if payload.opening_paragraph:
+        anchor = add_paragraph_after(anchor, payload.opening_paragraph)
+        format_paragraph(anchor, size=11, alignment=WD_ALIGN_PARAGRAPH.JUSTIFY, space_after=8)
+
     if payload.intro_paragraphs:
         anchor = add_paragraph_after(anchor, "Introducción")
-        format_paragraph(
-            anchor,
-            size=14,
-            bold=True,
-            alignment=WD_ALIGN_PARAGRAPH.LEFT,
-            space_after=6
-        )
+        format_paragraph(anchor, size=14, bold=True, alignment=WD_ALIGN_PARAGRAPH.LEFT, space_after=6)
 
         for paragraph_text in payload.intro_paragraphs:
             anchor = add_paragraph_after(anchor, paragraph_text)
@@ -479,149 +625,137 @@ def render_report_body(document: Document, anchor: Paragraph, payload: GenerateD
 
         for table in section.tables:
             anchor = add_paragraph_after(anchor, f"Tabla {table_counter}. {table.title}")
-            format_paragraph(
-                anchor,
-                size=11,
-                bold=True,
-                italic=False,
-                alignment=WD_ALIGN_PARAGRAPH.LEFT,
-                space_after=3
-            )
+            format_paragraph(anchor, size=11, bold=True, alignment=WD_ALIGN_PARAGRAPH.LEFT, space_after=3)
 
             anchor = insert_table_after(document, anchor, table.headers, table.rows)
 
             if table.note:
                 anchor = add_paragraph_after(anchor, f"Nota. {table.note}")
-                format_paragraph(
-                    anchor,
-                    size=10,
-                    italic=True,
-                    alignment=WD_ALIGN_PARAGRAPH.LEFT,
-                    space_after=6
-                )
+                format_paragraph(anchor, size=10, italic=True, alignment=WD_ALIGN_PARAGRAPH.LEFT, space_after=6)
 
             table_counter += 1
 
         for figure in section.figures:
             anchor = add_paragraph_after(anchor, f"Figura {figure_counter}. {figure.title}")
-            format_paragraph(
-                anchor,
-                size=11,
-                bold=True,
-                alignment=WD_ALIGN_PARAGRAPH.LEFT,
-                space_after=3
-            )
+            format_paragraph(anchor, size=11, bold=True, alignment=WD_ALIGN_PARAGRAPH.LEFT, space_after=3)
+
+            anchor = insert_figure_after(anchor, figure)
 
             if figure.caption:
                 anchor = add_paragraph_after(anchor, figure.caption)
-                format_paragraph(
-                    anchor,
-                    size=10,
-                    italic=True,
-                    alignment=WD_ALIGN_PARAGRAPH.LEFT,
-                    space_after=6
-                )
+                format_paragraph(anchor, size=10, italic=True, alignment=WD_ALIGN_PARAGRAPH.LEFT, space_after=6)
 
             figure_counter += 1
 
 
-def render_letter_body(document: Document, anchor: Paragraph, payload: GenerateDocumentRequest):
-    if payload.city_date:
-        anchor = add_paragraph_after(anchor, payload.city_date)
-        format_paragraph(
-            anchor,
-            size=11,
-            alignment=WD_ALIGN_PARAGRAPH.RIGHT,
-            space_after=12
-        )
+# =========================
+# PLANTILLAS PROFESIONALES
+# =========================
 
-    recipient_lines = [
-        safe_text(payload.recipient_name),
-        safe_text(payload.recipient_position),
-        safe_text(payload.recipient_institution),
-    ]
-    recipient_lines = [line for line in recipient_lines if line.strip()]
+def fill_common_placeholders(document: Document, payload: GenerateDocumentRequest):
+    simple_mapping = {
+        "{{YEAR_MOTTO}}": safe_text(payload.year_motto),
+        "{{DOCUMENT_CODE}}": safe_text(payload.document_code),
+        "{{INSTITUTION}}": safe_text(payload.institution),
+        "{{FACULTY}}": safe_text(payload.faculty),
+        "{{DEPARTMENT}}": safe_text(payload.department),
+        "{{REPORT_KIND}}": safe_text(payload.report_kind),
+        "{{TITLE}}": safe_text(payload.title),
+        "{{SUBTITLE}}": safe_text(payload.subtitle),
+        "{{AUTHOR}}": safe_text(payload.author),
+        "{{REVIEWER}}": safe_text(payload.reviewer),
+        "{{CITY_DATE}}": safe_text(payload.city_date),
+        "{{RECIPIENT_NAME}}": safe_text(payload.recipient_name),
+        "{{RECIPIENT_POSITION}}": safe_text(payload.recipient_position),
+        "{{RECIPIENT_INSTITUTION}}": safe_text(payload.recipient_institution),
+        "{{SUBJECT}}": safe_text(payload.subject),
+        "{{GREETING}}": safe_text(payload.greeting),
+        "{{OPENING}}": safe_text(payload.opening),
+        "{{OPENING_PARAGRAPH}}": safe_text(payload.opening_paragraph),
+        "{{CLOSING}}": safe_text(payload.closing),
+        "{{SIGNATURE_NAME}}": safe_text(payload.signature_name),
+        "{{SIGNATURE_POSITION}}": safe_text(payload.signature_position),
+        "{{ADDRESSEE}}": safe_text(payload.report_addressee),
+    }
+    replace_placeholder_everywhere(document, simple_mapping)
 
-    for line in recipient_lines:
-        anchor = add_paragraph_after(anchor, line)
-        format_paragraph(
-            anchor,
-            size=11,
-            bold=True if line == payload.recipient_name else False,
-            alignment=WD_ALIGN_PARAGRAPH.LEFT,
-            space_after=1
-        )
+    replace_placeholder_with_lines(document, "{{REFERENCE_BLOCK}}", build_reference_lines(payload.references))
+    replace_placeholder_with_lines(document, "{{CC_BLOCK}}", payload.cc_lines or [""])
+    replace_placeholder_with_lines(document, "{{FOOTER_BLOCK}}", payload.footer_lines or [""])
 
-    if recipient_lines:
-        anchor = add_paragraph_after(anchor, "")
+
+def create_letter_header_fallback(document: Document, anchor: Paragraph, payload: GenerateDocumentRequest) -> Paragraph:
+    if payload.year_motto:
+        anchor = add_paragraph_after(anchor, payload.year_motto)
+        format_paragraph(anchor, size=10, bold=True, alignment=WD_ALIGN_PARAGRAPH.CENTER, space_after=8)
+
+    if payload.document_code:
+        anchor = add_paragraph_after(anchor, payload.document_code)
+        format_paragraph(anchor, size=12, bold=True, alignment=WD_ALIGN_PARAGRAPH.CENTER, space_after=10)
+
+    if payload.recipient_name:
+        anchor = add_paragraph_after(anchor, f"Para: {payload.recipient_name}")
+        format_paragraph(anchor, size=11, bold=True, alignment=WD_ALIGN_PARAGRAPH.LEFT, space_after=2)
+
+    if payload.recipient_position:
+        anchor = add_paragraph_after(anchor, payload.recipient_position)
+        format_paragraph(anchor, size=11, alignment=WD_ALIGN_PARAGRAPH.LEFT, space_after=2)
+
+    if payload.recipient_institution:
+        anchor = add_paragraph_after(anchor, payload.recipient_institution)
         format_paragraph(anchor, size=11, alignment=WD_ALIGN_PARAGRAPH.LEFT, space_after=6)
 
     if payload.subject:
         anchor = add_paragraph_after(anchor, f"Asunto: {payload.subject}")
-        format_paragraph(
-            anchor,
-            size=11,
-            bold=True,
-            alignment=WD_ALIGN_PARAGRAPH.LEFT,
-            space_after=12
-        )
+        format_paragraph(anchor, size=11, bold=True, alignment=WD_ALIGN_PARAGRAPH.LEFT, space_after=6)
 
-    if payload.greeting:
-        anchor = add_paragraph_after(anchor, payload.greeting)
-        format_paragraph(
-            anchor,
-            size=11,
-            alignment=WD_ALIGN_PARAGRAPH.LEFT,
-            space_after=12
-        )
+    if payload.references:
+        anchor = add_paragraph_after(anchor, "Referencia:")
+        format_paragraph(anchor, size=11, bold=True, alignment=WD_ALIGN_PARAGRAPH.LEFT, space_after=2)
+        for line in build_reference_lines(payload.references):
+            anchor = add_paragraph_after(anchor, line)
+            format_paragraph(anchor, size=11, alignment=WD_ALIGN_PARAGRAPH.LEFT, space_after=1)
 
-    body_paragraphs = payload.body_paragraphs or [
-        "Se deja constancia del contenido principal de la presente comunicación."
-    ]
+    if payload.city_date:
+        anchor = add_paragraph_after(anchor, f"Fecha: {payload.city_date}")
+        format_paragraph(anchor, size=11, alignment=WD_ALIGN_PARAGRAPH.LEFT, space_after=8)
 
-    for paragraph_text in body_paragraphs:
-        anchor = add_paragraph_after(anchor, paragraph_text)
-        format_paragraph(
-            anchor,
-            size=11,
-            alignment=WD_ALIGN_PARAGRAPH.JUSTIFY,
-            space_after=8
-        )
+    return anchor
 
-    if payload.closing:
-        anchor = add_paragraph_after(anchor, "")
-        format_paragraph(anchor, size=11, alignment=WD_ALIGN_PARAGRAPH.LEFT, space_after=6)
 
-        anchor = add_paragraph_after(anchor, payload.closing)
-        format_paragraph(
-            anchor,
-            size=11,
-            alignment=WD_ALIGN_PARAGRAPH.LEFT,
-            space_after=18
-        )
+def create_report_header_fallback(document: Document, anchor: Paragraph, payload: GenerateDocumentRequest) -> Paragraph:
+    if payload.year_motto:
+        anchor = add_paragraph_after(anchor, payload.year_motto)
+        format_paragraph(anchor, size=10, bold=True, alignment=WD_ALIGN_PARAGRAPH.CENTER, space_after=8)
 
-    if payload.signature_name:
-        anchor = add_paragraph_after(anchor, payload.signature_name)
-        format_paragraph(
-            anchor,
-            size=11,
-            bold=True,
-            alignment=WD_ALIGN_PARAGRAPH.LEFT,
-            space_after=1
-        )
+    if payload.document_code:
+        anchor = add_paragraph_after(anchor, payload.document_code)
+        format_paragraph(anchor, size=12, bold=True, alignment=WD_ALIGN_PARAGRAPH.LEFT, space_after=8)
 
-    if payload.signature_position:
-        anchor = add_paragraph_after(anchor, payload.signature_position)
-        format_paragraph(
-            anchor,
-            size=11,
-            alignment=WD_ALIGN_PARAGRAPH.LEFT,
-            space_after=1
-        )
+    if payload.report_addressee:
+        anchor = add_paragraph_after(anchor, f"A: {payload.report_addressee}")
+        format_paragraph(anchor, size=11, alignment=WD_ALIGN_PARAGRAPH.LEFT, space_after=4)
+
+    if payload.subject:
+        anchor = add_paragraph_after(anchor, f"Asunto: {payload.subject}")
+        format_paragraph(anchor, size=11, bold=True, alignment=WD_ALIGN_PARAGRAPH.LEFT, space_after=4)
+
+    if payload.references:
+        anchor = add_paragraph_after(anchor, "Referencia:")
+        format_paragraph(anchor, size=11, bold=True, alignment=WD_ALIGN_PARAGRAPH.LEFT, space_after=2)
+        for line in build_reference_lines(payload.references):
+            anchor = add_paragraph_after(anchor, line)
+            format_paragraph(anchor, size=11, alignment=WD_ALIGN_PARAGRAPH.LEFT, space_after=1)
+
+    if payload.city_date:
+        anchor = add_paragraph_after(anchor, f"Fecha: {payload.city_date}")
+        format_paragraph(anchor, size=11, alignment=WD_ALIGN_PARAGRAPH.LEFT, space_after=8)
+
+    return anchor
 
 
 # =========================
-# LIMPIEZA DE ESPACIADO
+# LIMPIEZA
 # =========================
 
 def delete_paragraph(paragraph: Paragraph):
@@ -646,28 +780,12 @@ def is_blank_paragraph(paragraph: Paragraph) -> bool:
     return not paragraph.text.strip()
 
 
-def collapse_blank_paragraphs_after_marker(
-    document: Document,
-    marker_text: str,
-    max_consecutive_blank: int = 1
-):
-    paragraphs = list(document.paragraphs)
-
-    start_index = None
-    for idx, paragraph in enumerate(paragraphs):
-        if paragraph.text.strip() == marker_text:
-            start_index = idx
-            break
-
-    if start_index is None:
-        return
-
+def collapse_blank_paragraphs(document: Document, max_consecutive_blank: int = 1):
     blank_run = 0
-    for paragraph in list(document.paragraphs)[start_index + 1:]:
+    for paragraph in list(document.paragraphs):
         if paragraph_has_page_break(paragraph):
             blank_run = 0
             continue
-
         if is_blank_paragraph(paragraph):
             blank_run += 1
             if blank_run > max_consecutive_blank:
@@ -676,46 +794,20 @@ def collapse_blank_paragraphs_after_marker(
             blank_run = 0
 
 
-def cleanup_generated_spacing(document: Document, payload: GenerateDocumentRequest):
-    # Compacta los bloques vacíos a partir del índice general,
-    # sin tocar demasiado la portada.
-    collapse_blank_paragraphs_after_marker(document, "ÍNDICE GENERAL", max_consecutive_blank=1)
-
-
 # =========================
 # GENERACIÓN PRINCIPAL
 # =========================
 
 def build_document(payload: GenerateDocumentRequest) -> io.BytesIO:
-    if not TEMPLATE_PATH.exists():
-        raise FileNotFoundError(f"No se encontró la plantilla en: {TEMPLATE_PATH}")
+    template_path = choose_template_path(payload)
+    document = Document(str(template_path))
 
-    document = Document(str(TEMPLATE_PATH))
+    fill_common_placeholders(document, payload)
 
-    report_kind = payload.report_kind.strip() if payload.report_kind else ""
-    if not report_kind:
-        report_kind = "Carta formal" if payload.document_type == "carta" else "Informe técnico"
-
-    toc_lines = build_toc_lines(payload)
-    table_index_lines = build_table_index_lines(payload)
-    figure_index_lines = build_figure_index_lines(payload)
-
-    simple_mapping = {
-        "{{INSTITUTION}}": safe_text(payload.institution),
-        "{{FACULTY}}": safe_text(payload.faculty),
-        "{{DEPARTMENT}}": safe_text(payload.department),
-        "{{REPORT_KIND}}": safe_text(report_kind),
-        "{{TITLE}}": safe_text(payload.title),
-        "{{SUBTITLE}}": safe_text(payload.subtitle),
-        "{{AUTHOR}}": safe_text(payload.author),
-        "{{REVIEWER}}": safe_text(payload.reviewer),
-        "{{CITY_DATE}}": safe_text(payload.city_date),
-    }
-    replace_placeholder_everywhere(document, simple_mapping)
-
-    replace_placeholder_with_lines(document, "{{TOC}}", toc_lines)
-    replace_placeholder_with_lines(document, "{{TABLE_INDEX}}", table_index_lines)
-    replace_placeholder_with_lines(document, "{{FIGURE_INDEX}}", figure_index_lines)
+    if payload.document_type == "informe":
+        replace_placeholder_with_lines(document, "{{TOC}}", build_toc_lines(payload))
+        replace_placeholder_with_lines(document, "{{TABLE_INDEX}}", build_table_index_lines(payload))
+        replace_placeholder_with_lines(document, "{{FIGURE_INDEX}}", build_figure_index_lines(payload))
 
     body_anchor = find_paragraph_with_placeholder(document, "{{BODY_CONTENT}}")
     if body_anchor:
@@ -727,12 +819,19 @@ def build_document(payload: GenerateDocumentRequest) -> io.BytesIO:
             document.add_paragraph("")
             body_anchor = document.paragraphs[-1]
 
+    # Si está usando la plantilla genérica, arma encabezados de manera programática
+    if is_generic_template(template_path):
+        if payload.document_type == "carta":
+            body_anchor = create_letter_header_fallback(document, body_anchor, payload)
+        else:
+            body_anchor = create_report_header_fallback(document, body_anchor, payload)
+
     if payload.document_type == "carta":
         render_letter_body(document, body_anchor, payload)
     else:
         render_report_body(document, body_anchor, payload)
 
-    cleanup_generated_spacing(document, payload)
+    collapse_blank_paragraphs(document, max_consecutive_blank=1)
 
     output = io.BytesIO()
     document.save(output)
@@ -748,9 +847,10 @@ def build_document(payload: GenerateDocumentRequest) -> io.BytesIO:
 def root():
     return {
         "message": "GPT DOC Backend activo",
-        "version": "0.9.3 template-based robust tables + spacing cleanup",
-        "template_path": str(TEMPLATE_PATH),
-        "template_exists": TEMPLATE_PATH.exists(),
+        "version": "1.0.0 professional templates + image support",
+        "generic_template_exists": GENERIC_TEMPLATE.exists(),
+        "letter_template_exists": any(p.exists() for p in LETTER_TEMPLATE_CANDIDATES if p != GENERIC_TEMPLATE),
+        "report_template_exists": any(p.exists() for p in REPORT_TEMPLATE_CANDIDATES if p != GENERIC_TEMPLATE),
         "allowed_document_types": ["carta", "informe"],
     }
 
@@ -759,8 +859,9 @@ def root():
 def health():
     return {
         "status": "ok",
-        "template_exists": TEMPLATE_PATH.exists(),
-        "template_path": str(TEMPLATE_PATH),
+        "generic_template_exists": GENERIC_TEMPLATE.exists(),
+        "letter_template_exists": any(p.exists() for p in LETTER_TEMPLATE_CANDIDATES if p != GENERIC_TEMPLATE),
+        "report_template_exists": any(p.exists() for p in REPORT_TEMPLATE_CANDIDATES if p != GENERIC_TEMPLATE),
     }
 
 
@@ -775,9 +876,7 @@ def generate_document(payload: GenerateDocumentRequest):
         return StreamingResponse(
             output,
             media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-            headers={
-                "Content-Disposition": f'attachment; filename="{filename}"'
-            }
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'}
         )
 
     except HTTPException:
