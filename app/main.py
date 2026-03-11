@@ -20,13 +20,13 @@ from docx.oxml import OxmlElement
 from docx.text.paragraph import Paragraph
 
 
-app = FastAPI(title="GPT DOC Backend", version="1.1.0 action-endpoint")
+app = FastAPI(title="GPT DOC Backend", version="1.1.1 inline-file-response")
 
 
 DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("docx-timing")
+logger = logging.getLogger("docx-backend")
 
 
 # =========================
@@ -498,7 +498,10 @@ def build_document_file(payload: GenerateDocumentRequest) -> Tuple[str, str]:
         output_path = tmp.name
 
     document.save(output_path)
-    filename = f"{doc_type}_generado.docx"
+
+    unique_suffix = int(time.time() * 1000)
+    filename = f"{doc_type}_generado_{unique_suffix}.docx"
+
     return output_path, filename
 
 
@@ -518,6 +521,7 @@ def health():
 
 @app.post("/generate-document")
 def generate_document(payload: GenerateDocumentRequest):
+    output_path = None
     try:
         output_path, filename = build_document_file(payload)
 
@@ -531,6 +535,13 @@ def generate_document(payload: GenerateDocumentRequest):
         detail = f"No se pudo generar el documento. Detalle técnico: {type(e).__name__}: {str(e)}"
         raise HTTPException(status_code=500, detail=detail)
 
+    finally:
+        if output_path and os.path.exists(output_path):
+            try:
+                os.remove(output_path)
+            except Exception:
+                pass
+
 
 @app.post("/generate-document-action")
 def generate_document_action(payload: GenerateDocumentRequest):
@@ -538,42 +549,23 @@ def generate_document_action(payload: GenerateDocumentRequest):
     t0 = time.perf_counter()
 
     try:
-        t_build_start = time.perf_counter()
         output_path, filename = build_document_file(payload)
-        t_build_end = time.perf_counter()
 
-        t_read_start = time.perf_counter()
         with open(output_path, "rb") as f:
             file_bytes = f.read()
-        t_read_end = time.perf_counter()
 
-        t_b64_start = time.perf_counter()
         file_b64 = base64.b64encode(file_bytes).decode("utf-8")
-        t_b64_end = time.perf_counter()
 
         total_time = time.perf_counter() - t0
-
         logger.info(
-            "[DOCX_TIMING] document_type=%s build_s=%.4f read_s=%.4f base64_s=%.4f total_s=%.4f file_size_bytes=%d",
+            "[DOCX_INLINE_OK] document_type=%s total_s=%.4f file_size_bytes=%d filename=%s",
             payload.document_type.lower(),
-            t_build_end - t_build_start,
-            t_read_end - t_read_start,
-            t_b64_end - t_b64_start,
             total_time,
             len(file_bytes),
+            filename,
         )
 
         return {
-            "message": "Documento generado correctamente",
-            "document_type": payload.document_type.lower(),
-            "filename": filename,
-            "timing": {
-                "build_s": round(t_build_end - t_build_start, 4),
-                "read_s": round(t_read_end - t_read_start, 4),
-                "base64_s": round(t_b64_end - t_b64_start, 4),
-                "total_s": round(total_time, 4),
-                "file_size_bytes": len(file_bytes),
-            },
             "openaiFileResponse": [
                 {
                     "name": filename,
@@ -585,6 +577,7 @@ def generate_document_action(payload: GenerateDocumentRequest):
 
     except Exception as e:
         detail = f"No se pudo generar el documento para action. Detalle técnico: {type(e).__name__}: {str(e)}"
+        logger.exception(detail)
         raise HTTPException(status_code=500, detail=detail)
 
     finally:
