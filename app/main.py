@@ -10,6 +10,8 @@ import binascii
 import os
 import re
 import requests
+import time
+import logging
 
 from docx import Document
 from docx.shared import Inches
@@ -22,6 +24,9 @@ app = FastAPI(title="GPT DOC Backend", version="1.1.0 action-endpoint")
 
 
 DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("docx-timing")
 
 
 # =========================
@@ -506,6 +511,11 @@ def root():
     return {"message": "GPT DOC Backend operativo"}
 
 
+@app.get("/health")
+def health():
+    return {"status": "ok"}
+
+
 @app.post("/generate-document")
 def generate_document(payload: GenerateDocumentRequest):
     try:
@@ -525,19 +535,45 @@ def generate_document(payload: GenerateDocumentRequest):
 @app.post("/generate-document-action")
 def generate_document_action(payload: GenerateDocumentRequest):
     output_path = None
+    t0 = time.perf_counter()
 
     try:
+        t_build_start = time.perf_counter()
         output_path, filename = build_document_file(payload)
+        t_build_end = time.perf_counter()
 
+        t_read_start = time.perf_counter()
         with open(output_path, "rb") as f:
             file_bytes = f.read()
+        t_read_end = time.perf_counter()
 
+        t_b64_start = time.perf_counter()
         file_b64 = base64.b64encode(file_bytes).decode("utf-8")
+        t_b64_end = time.perf_counter()
+
+        total_time = time.perf_counter() - t0
+
+        logger.info(
+            "[DOCX_TIMING] document_type=%s build_s=%.4f read_s=%.4f base64_s=%.4f total_s=%.4f file_size_bytes=%d",
+            payload.document_type.lower(),
+            t_build_end - t_build_start,
+            t_read_end - t_read_start,
+            t_b64_end - t_b64_start,
+            total_time,
+            len(file_bytes),
+        )
 
         return {
             "message": "Documento generado correctamente",
             "document_type": payload.document_type.lower(),
             "filename": filename,
+            "timing": {
+                "build_s": round(t_build_end - t_build_start, 4),
+                "read_s": round(t_read_end - t_read_start, 4),
+                "base64_s": round(t_b64_end - t_b64_start, 4),
+                "total_s": round(total_time, 4),
+                "file_size_bytes": len(file_bytes),
+            },
             "openaiFileResponse": [
                 {
                     "name": filename,
